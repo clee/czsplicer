@@ -158,6 +158,9 @@ Directory arguments are expanded to their sorted `*.cbor.zstd` contents, so
 - **Streaming.** Files can be large (a single 3.3 MB export decompresses to
   ~1.1 GB / 2000 records). All read paths stream record-by-record; only
   `extract --array` buffers the full result in memory.
+- **Compression.** Write paths default to zstd level 9 (a good speed/ratio
+  balance). Use `--level 19` for archival compression (~2x smaller, ~10x slower),
+  or lower levels for faster output.
 
 ## Development
 

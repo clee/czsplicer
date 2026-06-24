@@ -88,8 +88,8 @@ struct RepackCli {
     input: PathBuf,
     #[arg(short, long, required = true)]
     output: PathBuf,
-    /// zstd compression level 1..22 (default 19).
-    #[arg(long, default_value_t = 19)]
+    /// zstd compression level 1..22 (default 9).
+    #[arg(long, default_value_t = 9)]
     level: i32,
     /// Emit raw uncompressed .cbor instead of .cbor.zstd.
     #[arg(long)]
@@ -102,8 +102,8 @@ struct EditCli {
     files: Vec<PathBuf>,
     #[arg(short, long, required = true)]
     output: PathBuf,
-    /// zstd compression level (default 19). Ignored with --json.
-    #[arg(long, default_value_t = 19)]
+    /// zstd compression level (default 9). Ignored with --json.
+    #[arg(long, default_value_t = 9)]
     level: i32,
     /// Null out request/response headers.
     #[arg(long)]
@@ -171,8 +171,8 @@ struct MergeCli {
     files: Vec<PathBuf>,
     #[arg(short, long, required = true)]
     output: PathBuf,
-    /// zstd compression level 1..22 (default 19).
-    #[arg(long, default_value_t = 19)]
+    /// zstd compression level 1..22 (default 9).
+    #[arg(long, default_value_t = 9)]
     level: i32,
     #[command(flatten)]
     filter: filter::FilterArgs,
@@ -188,8 +188,8 @@ struct SplitCli {
     /// Grouping dimension: day|session|model|provider|path.
     #[arg(long, required = true, value_name = "DIM")]
     by: String,
-    /// zstd compression level 1..22 (default 19).
-    #[arg(long, default_value_t = 19)]
+    /// zstd compression level 1..22 (default 9).
+    #[arg(long, default_value_t = 9)]
     level: i32,
     /// Minimum records for a group to be emitted. Defaults to 2 for `--by session`
     /// (skips single-record throwaways), 1 otherwise.
