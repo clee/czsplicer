@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
 // small helpers
@@ -70,7 +70,9 @@ pub fn cmd_info(args: &InfoArgs) -> Result<()> {
         let mut max_id: Option<i64> = None;
         let mut first_ts: Option<String> = None;
         let mut last_ts: Option<String> = None;
-        let mut keys = 0usize;
+        let mut min_keys = usize::MAX;
+        let mut max_keys = 0usize;
+        let mut distinct_keys: std::collections::BTreeSet<String> = Default::default();
         let mut models: std::collections::BTreeSet<String> = Default::default();
 
         let mut stream = CountingRecordStream::open(f)?;
@@ -87,7 +89,13 @@ pub fn cmd_info(args: &InfoArgs) -> Result<()> {
                 last_ts = Some(ts);
             }
             if let ciborium::Value::Map(m) = &rec {
-                keys = m.len();
+                min_keys = min_keys.min(m.len());
+                max_keys = max_keys.max(m.len());
+                for (k, _) in m.iter() {
+                    if let Some(s) = format::as_str(k) {
+                        distinct_keys.insert(s);
+                    }
+                }
             }
             if let Some(m) = format::rec_str(&rec, "model") {
                 models.insert(m);
@@ -109,7 +117,9 @@ pub fn cmd_info(args: &InfoArgs) -> Result<()> {
             "id_max": max_id,
             "first_timestamp": first_ts,
             "last_timestamp": last_ts,
-            "top_level_keys": keys,
+            "top_level_keys": distinct_keys.len(),
+            "min_top_level_keys": if min_keys == usize::MAX { 0 } else { min_keys },
+            "max_top_level_keys": max_keys,
             "models": models.into_iter().collect::<Vec<_>>(),
         }));
     }
@@ -261,6 +271,9 @@ pub struct ExtractArgs {
 
 pub fn cmd_extract(args: &ExtractArgs) -> Result<()> {
     let filter = args.filter.build()?;
+    if let Some(d) = &args.bodies {
+        std::fs::create_dir_all(d)?;
+    }
     let mut out = output_writer(&args.output)?;
     let mut count = 0u64;
 
@@ -311,7 +324,6 @@ fn extract_record(rec: &ciborium::Value, args: &ExtractArgs) -> Result<serde_jso
             for (key, suffix) in [("requestBody", "request"), ("responseBody", "response")] {
                 if let Some(v) = format::field(cap, key) {
                     let path = bodies_dir.join(format!("{id}.{suffix}"));
-                    std::fs::create_dir_all(bodies_dir).ok();
                     match v {
                         ciborium::Value::Text(s) => std::fs::write(&path, s)?,
                         ciborium::Value::Bytes(b) => std::fs::write(&path, b)?,
@@ -736,13 +748,6 @@ fn human_dur(ms: i64) -> String {
     }
 }
 
-// expose RecordStream type for main if needed
-#[allow(dead_code)]
-pub fn _ensure_stream_link(_: &RecordStream) {}
-
-#[allow(dead_code)]
-pub fn _ensure_counting_link(_: &CountingRecordStream, _: &Path) {}
-
 // ---------------------------------------------------------------------------
 // grep
 // ---------------------------------------------------------------------------
@@ -799,11 +804,17 @@ pub fn cmd_grep(args: &GrepArgs) -> Result<()> {
                 continue;
             }
 
-            // Find first matching snippet.
+            // Find first matching snippet (or, in --count mode, first match).
             let mut found: Option<String> = None;
             let mut visitor = |s: &str| {
                 if found.is_none() {
-                    found = snippet_around(&re, s);
+                    if args.count {
+                        if re.is_match(s) {
+                            found = Some(String::new());
+                        }
+                    } else {
+                        found = snippet_around(&re, s);
+                    }
                 }
             };
             if let Some(field_path) = &args.field {
@@ -1008,17 +1019,6 @@ pub fn expand_presets(names: &[String]) -> Result<Vec<String>> {
         }
     }
     Ok(out)
-}
-
-/// Print available presets (for `edit --list-presets`).
-#[allow(dead_code)]
-pub fn print_presets() {
-    println!("{:<12} {}", "preset", "matches");
-    println!("{}", "-".repeat(50));
-    for (name, _pat, desc) in REDACT_PRESETS {
-        println!("{:<12} {desc}", name);
-    }
-    println!("{:<12} all of the above", "all");
 }
 
 // ---------------------------------------------------------------------------

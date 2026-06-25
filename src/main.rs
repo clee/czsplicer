@@ -4,7 +4,7 @@ mod format;
 
 use anyhow::Result;
 use clap::Parser;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// `czsplicer`: inspect, extract, edit/redact, and repack `.cbor.zstd` log
 /// streams (e.g. capture-log exports from Tailscale Aperture).
@@ -307,7 +307,7 @@ fn expand(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
                     p.extension().and_then(|e| e.to_str()) == Some("zstd")
                         && p.file_stem()
                             .and_then(|e| e.to_str())
-                            .map_or(false, |s| s.ends_with(".cbor"))
+                            .is_some_and(|s| s.ends_with(".cbor"))
                 })
                 .collect();
             entries.sort();
@@ -318,6 +318,3 @@ fn expand(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
     }
     Ok(out)
 }
-
-#[allow(dead_code)]
-fn _path_link(_: &Path) {}

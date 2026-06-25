@@ -361,10 +361,22 @@ pub fn path_null(root: &mut ciborium::Value, path: &str) -> bool {
 }
 
 /// Applies a regex substitution to every Text value reachable from `root`.
+///
+/// Also scrubs `Bytes` whose contents are valid UTF-8 — this is where raw HTTP
+/// bodies live (e.g. `capture.rawRequestBody` / `rawResponseBody`), i.e. the
+/// most likely place for live secrets. Non-UTF-8 (binary) payloads are left
+/// untouched rather than corrupted. This keeps redaction at least as thorough
+/// as `search_value_strings`, which `grep` uses to find these same strings —
+/// the two halves of the tool must agree on where strings live.
 pub fn redact_strings<F: Fn(&str) -> String>(root: &mut ciborium::Value, sub: &F) {
     match root {
         ciborium::Value::Text(s) => {
             *s = sub(s);
+        }
+        ciborium::Value::Bytes(b) => {
+            if let Ok(s) = std::str::from_utf8(b) {
+                *b = sub(s).into_bytes();
+            }
         }
         ciborium::Value::Array(a) => {
             for v in a.iter_mut() {

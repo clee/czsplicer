@@ -28,11 +28,7 @@ pub struct Filter {
 impl Filter {
     pub fn matches(&self, rec: &ciborium::Value) -> bool {
         let m = self.matches_pos(rec);
-        if self.invert {
-            !m
-        } else {
-            m
-        }
+        m ^ self.invert
     }
 
     fn matches_pos(&self, rec: &ciborium::Value) -> bool {

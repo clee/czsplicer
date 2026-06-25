@@ -66,9 +66,12 @@ czsplicer stats prod/ --by status
 ### Extracting & repacking (the round-trip)
 
 `extract` produces NDJSON by default (streaming, low memory); `repack` turns
-NDJSON or a JSON array back into `.cbor.zstd`. The round-trip is **lossless**:
-CBOR `bytes` bodies are carried through JSON as `{"__cbor_bytes_b64":"…"}`, and
-float precision is preserved.
+NDJSON or a JSON array back into `.cbor.zstd`. The round-trip is **lossless** for
+the data these logs contain: CBOR `bytes` bodies are carried through JSON as
+`{"__cbor_bytes_b64":"…"}`, and float precision is preserved. (The one
+theoretical exception is a CBOR negative integer below `i64::MIN` — down to
+−2⁶⁴ — which JSON has no native way to represent and falls back to f64; this
+never occurs in capture-log records.)
 
 ```sh
 # Full records to NDJSON (one JSON object per line)

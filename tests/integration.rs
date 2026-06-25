@@ -474,6 +474,65 @@ fn edit_redact_scrubs_strings() {
 }
 
 #[test]
+fn edit_redact_scrubs_byte_bodies() {
+    // Regression for the headline bug: capture.rawRequestBody is a CBOR `bytes`
+    // value (the raw HTTP body). `redact_strings` used to skip Bytes entirely,
+    // so a secret in a raw body survived `edit --redact` even though `grep`
+    // could find it via lossy UTF-8 decode. The fix scrubs UTF-8 byte bodies.
+    //
+    // We assert on the *decoded* body: the secret is never plain text in the
+    // extracted JSON (it rides inside `__cbor_bytes_b64`), so a naive
+    // `!out.contains(secret)` would pass even on the unfixed code — exactly the
+    // blind spot that let the bug ship.
+    use base64::Engine;
+    let body_b64 = "dG9rZW49c2stbGl2ZS1BYkNkMTIzNC1YWVomdXNlcj1hZG1pbkBleGFtcGxlLmNvbQ==";
+    let secret = "sk-live-AbCd1234-XYZ";
+    let ndjson =
+        "{\"id\":1,\"model\":\"alpha/one\",\"capture\":{\"rawRequestBody\":{\"__cbor_bytes_b64\":\""
+            .to_string()
+            + body_b64 + "\"}}}\n";
+    let f = Fixture::from_ndjson(&ndjson);
+    let out_cz = f.dir.join("redacted.cbor.zstd");
+    f.cmd()
+        .arg("edit")
+        .arg(&f.cbor_zstd)
+        .arg("-o")
+        .arg(&out_cz)
+        .arg("--redact")
+        .arg(secret)
+        .assert()
+        .success();
+
+    let out = f
+        .cmd()
+        .arg("extract")
+        .arg(&out_cz)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let recs = read_ndjson(std::str::from_utf8(&out).unwrap());
+    let b64_out = recs[0]["capture"]["rawRequestBody"]["__cbor_bytes_b64"]
+        .as_str()
+        .expect("rawRequestBody bytes present");
+    let decoded = String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(b64_out)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !decoded.contains(secret),
+        "secret leaked through bytes body: {decoded}"
+    );
+    assert!(
+        decoded.contains("[REDACTED]"),
+        "redaction marker missing in decoded body: {decoded}"
+    );
+}
+
+#[test]
 fn edit_strip_headers_nulls_headers() {
     let f = fixture();
     let out_cz = f.dir.join("stripped.cbor.zstd");
