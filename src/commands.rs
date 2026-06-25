@@ -1,5 +1,5 @@
 use crate::filter::FilterArgs;
-use crate::format::{self, CountingRecordStream, RecordStream};
+use crate::format::{self, RecordStream};
 use anyhow::{anyhow, Result};
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -54,8 +54,11 @@ fn human_bytes(n: u64) -> String {
 // info
 // ---------------------------------------------------------------------------
 
+#[derive(clap::Args)]
 pub struct InfoArgs {
+    #[arg(required = true)]
     pub files: Vec<PathBuf>,
+    #[arg(long)]
     pub json: bool,
 }
 
@@ -75,7 +78,7 @@ pub fn cmd_info(args: &InfoArgs) -> Result<()> {
         let mut distinct_keys: std::collections::BTreeSet<String> = Default::default();
         let mut models: std::collections::BTreeSet<String> = Default::default();
 
-        let mut stream = CountingRecordStream::open(f)?;
+        let mut stream = RecordStream::open_counting(f)?;
         while let Some(rec) = stream.next() {
             let rec = rec?;
             count += 1;
@@ -176,9 +179,13 @@ pub fn cmd_info(args: &InfoArgs) -> Result<()> {
 // ls
 // ---------------------------------------------------------------------------
 
+#[derive(clap::Args)]
 pub struct LsArgs {
+    #[arg(required = true)]
     pub files: Vec<PathBuf>,
+    #[command(flatten)]
     pub filter: FilterArgs,
+    #[arg(long)]
     pub json: bool,
 }
 
@@ -259,14 +266,27 @@ pub fn cmd_ls(args: &LsArgs) -> Result<()> {
 // extract
 // ---------------------------------------------------------------------------
 
+#[derive(clap::Args)]
 pub struct ExtractArgs {
+    #[arg(required = true)]
     pub files: Vec<PathBuf>,
-    pub filter: FilterArgs,
+    /// Output file (default: stdout).
+    #[arg(short, long)]
     pub output: Option<PathBuf>,
+    /// Emit a single JSON array instead of NDJSON (buffers in memory).
+    #[arg(long)]
     pub array: bool,
+    /// Pretty-print (implies --array formatting).
+    #[arg(long)]
     pub pretty: bool,
+    /// Also dump capture.requestBody / responseBody to <id>.request / <id>.response in DIR.
+    #[arg(long, value_name = "DIR")]
     pub bodies: Option<PathBuf>,
+    /// Project only these dotted paths (e.g. id,model,usage.input_tokens).
+    #[arg(long, value_name = "PATHS", value_delimiter = ',')]
     pub fields: Vec<String>,
+    #[command(flatten)]
+    pub filter: FilterArgs,
 }
 
 pub fn cmd_extract(args: &ExtractArgs) -> Result<()> {
@@ -352,11 +372,19 @@ fn extract_record(rec: &ciborium::Value, args: &ExtractArgs) -> Result<serde_jso
 // repack
 // ---------------------------------------------------------------------------
 
+#[derive(clap::Args)]
 pub struct RepackArgs {
+    /// Input JSON file (NDJSON or a JSON array). Use - for stdin.
+    #[arg(required = true)]
     pub input: PathBuf,
+    #[arg(short, long, required = true)]
     pub output: PathBuf,
+    /// zstd compression level 1..22 (default 9).
+    #[arg(long, default_value_t = 9)]
     pub level: i32,
-    pub raw: bool, // emit uncompressed .cbor
+    /// Emit raw uncompressed .cbor instead of .cbor.zstd.
+    #[arg(long)]
+    pub raw: bool,
 }
 
 pub fn cmd_repack(args: &RepackArgs) -> Result<()> {
@@ -435,18 +463,40 @@ pub fn cmd_repack(args: &RepackArgs) -> Result<()> {
 // edit (redact / strip / drop)
 // ---------------------------------------------------------------------------
 
+#[derive(clap::Args)]
 pub struct EditArgs {
+    #[arg(required = true)]
     pub files: Vec<PathBuf>,
-    pub filter: FilterArgs,
+    #[arg(short, long, required = true)]
     pub output: PathBuf,
+    /// zstd compression level (default 9). Ignored with --json.
+    #[arg(long, default_value_t = 9)]
     pub level: i32,
+    /// Null out request/response headers.
+    #[arg(long)]
     pub strip_headers: bool,
+    /// Null out a dotted field path (e.g. capture.requestBody). Repeatable.
+    #[arg(long, value_name = "PATH")]
     pub strip: Vec<String>,
+    /// Regex to redact from string bodies; matches replaced with the replacement.
+    /// Repeatable. Applies to capture.* by default, or whole record with --all-strings.
+    #[arg(long, value_name = "REGEX")]
     pub redact: Vec<String>,
+    /// Redact using a named preset: email, jwt, apikey, bearer, aws, ipv4,
+    /// uuid, creditcard, ssn, or all. Repeatable. Combines with --redact.
+    #[arg(long = "redact-preset", value_name = "PRESET")]
     pub redact_presets: Vec<String>,
+    /// Apply redact regexes to every string in the record, not just capture bodies.
+    #[arg(long)]
     pub all_strings: bool,
+    /// Replacement text for redacted matches (default "[REDACTED]").
+    #[arg(long, default_value = "[REDACTED]")]
     pub redact_replacement: String,
+    /// Emit NDJSON instead of a .cbor.zstd file (output "-" for stdout).
+    #[arg(long)]
     pub json: bool,
+    #[command(flatten)]
+    pub filter: FilterArgs,
 }
 
 pub fn cmd_edit(args: &EditArgs) -> Result<()> {
@@ -546,11 +596,17 @@ fn transform(rec: &mut ciborium::Value, args: &EditArgs, regexes: &[regex::Regex
 // stats
 // ---------------------------------------------------------------------------
 
+#[derive(clap::Args)]
 pub struct StatsArgs {
+    #[arg(required = true)]
     pub files: Vec<PathBuf>,
-    pub filter: FilterArgs,
+    #[arg(long)]
     pub json: bool,
+    /// Breakdown dimension: "model" (default), "provider", "path", or "status".
+    #[arg(long)]
     pub by: Option<String>,
+    #[command(flatten)]
+    pub filter: FilterArgs,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -752,14 +808,28 @@ fn human_dur(ms: i64) -> String {
 // grep
 // ---------------------------------------------------------------------------
 
+#[derive(clap::Args)]
 pub struct GrepArgs {
-    pub files: Vec<PathBuf>,
+    /// Regex pattern to search for.
     pub pattern: String,
+    #[arg(required = true)]
+    pub files: Vec<PathBuf>,
+    /// Case-insensitive matching.
+    #[arg(short = 'i', long)]
     pub ignore_case: bool,
+    /// Search only this dotted field path (default: all string/bytes values).
+    #[arg(long, value_name = "PATH")]
     pub field: Option<String>,
+    /// Print "id: <snippet>" per match (grep-like) instead of the table.
+    #[arg(long)]
     pub show_matches: bool,
+    /// Print only the total match count.
+    #[arg(long)]
     pub count: bool,
+    /// Output matching records as NDJSON.
+    #[arg(long)]
     pub json: bool,
+    #[command(flatten)]
     pub filter: FilterArgs,
 }
 
@@ -870,8 +940,11 @@ pub fn cmd_grep(args: &GrepArgs) -> Result<()> {
 // verify
 // ---------------------------------------------------------------------------
 
+#[derive(clap::Args)]
 pub struct VerifyArgs {
+    #[arg(required = true)]
     pub files: Vec<PathBuf>,
+    #[arg(long)]
     pub json: bool,
 }
 
@@ -883,7 +956,7 @@ pub fn cmd_verify(args: &VerifyArgs) -> Result<()> {
 
     for f in &args.files {
         let comp = std::fs::metadata(f)?.len();
-        let mut stream = CountingRecordStream::open(f)?;
+        let mut stream = RecordStream::open_counting(f)?;
         let mut count = 0u64;
         let mut error: Option<String> = None;
 
@@ -1025,10 +1098,16 @@ pub fn expand_presets(names: &[String]) -> Result<Vec<String>> {
 // merge
 // ---------------------------------------------------------------------------
 
+#[derive(clap::Args)]
 pub struct MergeArgs {
+    #[arg(required = true)]
     pub files: Vec<PathBuf>,
+    #[arg(short, long, required = true)]
     pub output: PathBuf,
+    /// zstd compression level 1..22 (default 9).
+    #[arg(long, default_value_t = 9)]
     pub level: i32,
+    #[command(flatten)]
     pub filter: FilterArgs,
 }
 
@@ -1064,14 +1143,28 @@ pub fn cmd_merge(args: &MergeArgs) -> Result<()> {
 // split
 // ---------------------------------------------------------------------------
 
+#[derive(clap::Args)]
 pub struct SplitArgs {
+    #[arg(required = true)]
     pub files: Vec<PathBuf>,
+    /// Output directory (created if missing).
+    #[arg(long, required = true, value_name = "DIR")]
     pub out_dir: PathBuf,
+    /// Grouping dimension: day|session|model|provider|path.
+    #[arg(long, required = true, value_name = "DIM")]
     pub by: String,
+    /// zstd compression level 1..22 (default 9).
+    #[arg(long, default_value_t = 9)]
     pub level: i32,
+    /// Minimum records for a group to be emitted. Defaults to 2 for `--by session`
+    /// (skips single-record throwaways), 1 otherwise.
+    #[arg(long, value_name = "N")]
     pub min_records: Option<usize>,
-    pub filter: FilterArgs,
+    /// Print a manifest (groups, files, counts) as JSON instead of the table.
+    #[arg(long)]
     pub json: bool,
+    #[command(flatten)]
+    pub filter: FilterArgs,
 }
 
 #[derive(Clone, Copy)]

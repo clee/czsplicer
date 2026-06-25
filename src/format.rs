@@ -160,73 +160,54 @@ impl<R: BufRead> BufRead for Counting<R> {
     }
 }
 
-/// Opens a `.cbor.zstd` file as a buffered, decompressing reader.
-pub fn open_zstd_reader(path: &Path) -> Result<BufReader<ZDecoder>> {
-    let f = File::open(path)?;
-    let dec: ZDecoder = zstd::Decoder::new(f)?;
-    Ok(BufReader::new(dec))
-}
-
 /// Streaming iterator over the concatenated top-level CBOR records in a file.
-pub struct RecordStream {
-    reader: BufReader<ZDecoder>,
+///
+/// Generic over the buffered reader so byte counting is an opt-in wrapper
+/// rather than a second stream type: `open` is the plain path, `open_counting`
+/// wraps the decoder in `Counting` and exposes `decompressed_bytes`.
+pub struct RecordStream<R: BufRead> {
+    reader: R,
     done: bool,
 }
-impl RecordStream {
-    pub fn open(path: &Path) -> Result<Self> {
-        Ok(Self {
-            reader: open_zstd_reader(path)?,
+
+impl<R: BufRead> RecordStream<R> {
+    pub fn new(reader: R) -> Self {
+        Self {
+            reader,
             done: false,
-        })
+        }
     }
 }
-impl Iterator for RecordStream {
+
+impl RecordStream<BufReader<ZDecoder>> {
+    /// Open a `.cbor.zstd` file as a stream of CBOR records.
+    pub fn open(path: &Path) -> Result<Self> {
+        let f = File::open(path)?;
+        let dec: ZDecoder = zstd::Decoder::new(f)?;
+        Ok(Self::new(BufReader::new(dec)))
+    }
+}
+
+impl RecordStream<BufReader<Counting<ZDecoder>>> {
+    /// Like `open`, but also counts decompressed bytes consumed.
+    pub fn open_counting(path: &Path) -> Result<Self> {
+        let f = File::open(path)?;
+        let dec: ZDecoder = zstd::Decoder::new(f)?;
+        Ok(Self::new(BufReader::new(Counting::new(dec))))
+    }
+    /// Total decompressed bytes read so far.
+    pub fn decompressed_bytes(&self) -> u64 {
+        self.reader.get_ref().bytes
+    }
+}
+
+impl<R: BufRead> Iterator for RecordStream<R> {
     type Item = Result<ciborium::Value>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
             return None;
         }
         // Peek to distinguish "no more records" from a truncated record.
-        match self.reader.fill_buf() {
-            Ok(buf) if buf.is_empty() => {
-                self.done = true;
-                None
-            }
-            Ok(_) => {
-                Some(ciborium::from_reader(&mut self.reader).map_err(|e| anyhow!(format!("{e}"))))
-            }
-            Err(e) => {
-                self.done = true;
-                Some(Err(e.into()))
-            }
-        }
-    }
-}
-
-/// Same as RecordStream but also reports total decompressed bytes consumed.
-pub struct CountingRecordStream {
-    reader: BufReader<Counting<ZDecoder>>,
-    done: bool,
-}
-impl CountingRecordStream {
-    pub fn open(path: &Path) -> Result<Self> {
-        let f = File::open(path)?;
-        let dec: ZDecoder = zstd::Decoder::new(f)?;
-        Ok(Self {
-            reader: BufReader::new(Counting::new(dec)),
-            done: false,
-        })
-    }
-    pub fn decompressed_bytes(&self) -> u64 {
-        self.reader.get_ref().bytes
-    }
-}
-impl Iterator for CountingRecordStream {
-    type Item = Result<ciborium::Value>;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
-        }
         match self.reader.fill_buf() {
             Ok(buf) if buf.is_empty() => {
                 self.done = true;
