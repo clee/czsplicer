@@ -533,6 +533,66 @@ fn edit_redact_scrubs_byte_bodies() {
 }
 
 #[test]
+fn edit_redact_leaves_binary_bytes_untouched() {
+    // Counterpart to edit_redact_scrubs_byte_bodies: a byte body that is NOT
+    // valid UTF-8 (a genuinely binary payload) must pass through byte-for-byte
+    // unchanged. redact_strings gates Bytes scrubbing on valid UTF-8 precisely
+    // so it never corrupts binary content. This pins that contract — a future
+    // change to lossy-decode-and-rewrite would mangle binary bodies and fail
+    // here.
+    use base64::Engine;
+    // 0x80/0x81/0x82 are UTF-8 continuation bytes with no lead byte -> invalid.
+    let expected: Vec<u8> = vec![0x80, 0x81, 0x82];
+    let bin_b64 = "gIGC";
+    // Sanity: the constant round-trips and really is invalid UTF-8 (guards
+    // against a malformed literal above).
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(bin_b64)
+            .unwrap(),
+        expected,
+    );
+    assert!(std::str::from_utf8(&expected).is_err());
+
+    let ndjson =
+        "{\"id\":1,\"model\":\"alpha/one\",\"capture\":{\"rawRequestBody\":{\"__cbor_bytes_b64\":\""
+            .to_string()
+            + bin_b64 + "\"}}}\n";
+    let f = Fixture::from_ndjson(&ndjson);
+    let out_cz = f.dir.join("redacted.cbor.zstd");
+    f.cmd()
+        .arg("edit")
+        .arg(&f.cbor_zstd)
+        .arg("-o")
+        .arg(&out_cz)
+        .arg("--redact")
+        .arg(".") // would match every byte if the body were decoded as text
+        .assert()
+        .success();
+
+    let out = f
+        .cmd()
+        .arg("extract")
+        .arg(&out_cz)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let recs = read_ndjson(std::str::from_utf8(&out).unwrap());
+    let b64_out = recs[0]["capture"]["rawRequestBody"]["__cbor_bytes_b64"]
+        .as_str()
+        .expect("rawRequestBody bytes present");
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(b64_out)
+        .unwrap();
+    assert_eq!(
+        decoded, expected,
+        "binary byte body was modified by redaction"
+    );
+}
+
+#[test]
 fn edit_strip_headers_nulls_headers() {
     let f = fixture();
     let out_cz = f.dir.join("stripped.cbor.zstd");
