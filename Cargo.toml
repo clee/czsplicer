@@ -1,6 +1,6 @@
 [package]
 name = "czsplicer"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.80"
 authors = ["Chris Lee <clee@mg8.org>"]
@@ -11,6 +11,7 @@ homepage = "https://tangled.org/clee.sh/czsplicer"
 keywords = ["cbor", "zstd", "cli", "aperture", "log"]
 categories = ["command-line-utilities", "encoding"]
 readme = "README.md"
+exclude = ["hooks/"]
 
 [[bin]]
 name = "czsplicer"
