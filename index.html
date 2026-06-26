@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>czsplicer — CBOR/zstd log-stream CLI</title>
+<meta name="description" content="A CLI for inspecting, extracting, editing/redacting, and repacking .cbor.zstd log streams — designed for Tailscale Aperture capture exports.">
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-soft: #161b22;
+    --bg-term: #010409;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --accent-2: #7ee787;
+    --warn: #f0883e;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "Fira Code", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    line-height: 1.6;
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre { font-family: var(--mono); }
+
+  .wrap { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+
+  /* ---- header / hero ---- */
+  header.hero {
+    padding: 88px 0 56px;
+    text-align: center;
+    border-bottom: 1px solid var(--border);
+    background:
+      radial-gradient(ellipse 80% 50% at 50% 0%, rgba(88,166,255,0.08), transparent);
+  }
+  .badge {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent-2);
+    background: rgba(126,231,135,0.08);
+    border: 1px solid rgba(126,231,135,0.2);
+    padding: 3px 10px;
+    border-radius: 20px;
+    margin-bottom: 24px;
+  }
+  h1.title {
+    font-family: var(--mono);
+    font-size: clamp(40px, 8vw, 72px);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 16px;
+  }
+  h1.title .accent { color: var(--accent); }
+  .tagline {
+    font-size: 20px;
+    color: var(--text-dim);
+    max-width: 620px;
+    margin: 0 auto 40px;
+  }
+
+  /* ---- install bar ---- */
+  .install {
+    display: inline-flex;
+    align-items: center;
+    gap: 0;
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-family: var(--mono);
+    font-size: 15px;
+  }
+  .install .prompt { color: var(--accent-2); padding: 14px 8px 14px 18px; user-select: none; }
+  .install .cmd { padding: 14px 0; color: var(--text); }
+  .install button {
+    background: transparent;
+    border: none;
+    border-left: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 14px 16px;
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 13px;
+    transition: all 0.15s;
+  }
+  .install button:hover { color: var(--accent); background: rgba(88,166,255,0.06); }
+  .install button.copied { color: var(--accent-2); }
+
+  .links { margin-top: 28px; display: flex; gap: 20px; justify-content: center; font-size: 15px; }
+  .links a { display: inline-flex; align-items: center; gap: 6px; }
+
+  /* ---- sections ---- */
+  section { padding: 64px 0; border-bottom: 1px solid var(--border); }
+  h2.section-title {
+    font-family: var(--mono);
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+    margin-bottom: 24px;
+  }
+  h3 { font-size: 18px; margin-bottom: 12px; color: var(--text); }
+
+  /* ---- terminal ---- */
+  .terminal {
+    background: var(--bg-term);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+  }
+  .terminal .bar {
+    background: var(--bg-soft);
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .terminal .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .terminal .dot.r { background: #ff5f56; }
+  .terminal .dot.y { background: #ffbd2e; }
+  .terminal .dot.g { background: #27c93f; }
+  .terminal .title-bar { margin-left: 8px; font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
+  .terminal pre {
+    padding: 18px 20px;
+    font-size: 13.5px;
+    line-height: 1.65;
+    overflow-x: auto;
+    color: var(--text);
+  }
+  .terminal .c-prompt { color: var(--accent-2); }
+  .terminal .c-cmd { color: var(--text); }
+  .terminal .c-dim { color: var(--text-dim); }
+  .terminal .c-accent { color: var(--accent); }
+  .terminal .c-warn { color: var(--warn); }
+  .terminal .c-num { color: #d2a8ff; }
+  .terminal .c-key { color: #79c0ff; }
+  .terminal .c-str { color: #a5d6ff; }
+
+  /* ---- command grid ---- */
+  .cmd-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 680px) { .cmd-grid { grid-template-columns: 1fr; } }
+  .cmd-card {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 18px 20px;
+  }
+  .cmd-card .name {
+    font-family: var(--mono);
+    font-size: 15px;
+    color: var(--accent);
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .cmd-card .name::before { content: "$ "; color: var(--accent-2); }
+  .cmd-card .desc { font-size: 14px; color: var(--text-dim); }
+
+  /* ---- tables ---- */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    font-family: var(--mono);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+    font-weight: 500;
+  }
+  td code, th code {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-size: 13px;
+    color: var(--accent-2);
+    white-space: nowrap;
+  }
+  td .desc { color: var(--text-dim); }
+
+  .feature-list { list-style: none; display: grid; gap: 14px; }
+  .feature-list li { display: flex; gap: 12px; align-items: flex-start; }
+  .feature-list .bullet { color: var(--accent-2); font-family: var(--mono); flex-shrink: 0; }
+  .feature-list .text { color: var(--text); }
+  .feature-list .text strong { color: var(--accent); font-family: var(--mono); font-weight: 600; }
+
+  /* ---- footer ---- */
+  footer { padding: 48px 0 64px; text-align: center; color: var(--text-dim); font-size: 14px; }
+  footer .disc { margin-top: 12px; font-size: 12px; max-width: 540px; margin-left: auto; margin-right: auto; line-height: 1.5; }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <span class="badge">v0.2.0 · MIT</span>
+    <h1 class="title">cz<span class="accent">splicer</span></h1>
+    <p class="tagline">
+      Inspect, extract, edit/redact, and repack <code>.cbor.zstd</code> log streams.
+      Designed for Tailscale Aperture capture exports.
+    </p>
+
+    <div class="install">
+      <span class="prompt">$</span>
+      <span class="cmd" id="install-cmd">cargo install czsplicer</span>
+      <button onclick="copyCmd(this, 'cargo install czsplicer')">copy</button>
+    </div>
+
+    <div class="links">
+      <a href="https://tangled.org/clee.sh/czsplicer">repo ↗</a>
+      <a href="https://crates.io/crates/czsplicer">crates.io ↗</a>
+      <a href="https://docs.rs/czsplicer">docs.rs ↗</a>
+    </div>
+  </div>
+</header>
+
+<!-- terminal demo -->
+<section>
+  <div class="wrap">
+    <h2 class="section-title">/ see it in action</h2>
+    <div class="terminal">
+      <div class="bar">
+        <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <span class="title-bar">czsplicer on aperture exports</span>
+      </div>
+<pre><span class="c-prompt">$</span> <span class="c-cmd">czsplicer info prod/</span>
+<span class="c-dim">file                                            records    compressed       decomp     id range
+-----------------------------------------------------------------------------------------------</span>
+ts-aperture-export-1782318290.cbor.zstd             200      473.8 KB     149.8 MB       61-260
+ts-aperture-export-1782319707.cbor.zstd            2000        3.3 MB      1.13 GB    2021-4020
+<span class="c-dim">-----------------------------------------------------------------------------------------------</span>
+TOTAL: 4020 records, 11.8 MB compressed, 2.21 GB decompressed
+
+<span class="c-prompt">$</span> <span class="c-cmd">czsplicer grep -i 'cargo' prod/ --show-matches</span>
+ 1140:  <span class="c-dim">...nix develop -c</span> <span class="c-str">cargo run</span><span class="c-dim">...</span>
+ 1142:  <span class="c-dim">...Create workspace</span> <span class="c-str">Cargo.toml</span><span class="c-dim"> with all crates...</span>
+ 1145:  <span class="c-dim">...postgres/MySQL later) └──</span> <span class="c-str">Cargo.toml</span><span class="c-dim"> workspace root...</span>
+<span class="c-dim">2683 matching record(s)</span>
+
+<span class="c-prompt">$</span> <span class="c-cmd">czsplicer stats prod/1782318290.cbor.zstd --by model</span>
+<span class="c-key">=== czsplicer stats ===</span>
+records:              <span class="c-num">200</span>
+tokens (total):       <span class="c-num">30,522,077</span>
+estimated cost:       <span class="c-warn">$22.4848</span>
+
+<span class="c-key">=== by model ===</span>
+<span class="c-dim">model                       recs    in_tok   out_tok      cost$</span>
+<span class="c-dim">------------------------------------------------------------------</span>
+ollama/kimi-k2.6:cloud       178  29786107   135895    22.2181
+ollama/deepseek-v4-pro:cloud  22    587059    13016     0.2667</pre>
+    </div>
+  </div>
+</section>
+
+<!-- features -->
+<section>
+  <div class="wrap">
+    <h2 class="section-title">/ what it does</h2>
+    <ul class="feature-list">
+      <li>
+        <span class="bullet">▸</span>
+        <span class="text"><strong>Lossless round-trips.</strong> Extract CBOR streams to JSON and repack back without data loss — <code>bytes</code> bodies are carried through as <code>{"__cbor_bytes_b64":"…"}</code> sentinels, and float precision is preserved end-to-end.</span>
+      </li>
+      <li>
+        <span class="bullet">▸</span>
+        <span class="text"><strong>Streaming at scale.</strong> A single 3.3 MB export decompresses to 1.1 GB / 2000 records. Every read path streams record-by-record; nothing is buffered unless you ask for a JSON array.</span>
+      </li>
+      <li>
+        <span class="bullet">▸</span>
+        <span class="text"><strong>Built-in redaction.</strong> Nine canned secret presets (<code>email</code>, <code>jwt</code>, <code>apikey</code>, <code>bearer</code>, <code>aws</code>, …) plus custom regexes, with one-pass strip-and-drop.</span>
+      </li>
+      <li>
+        <span class="bullet">▸</span>
+        <span class="text"><strong>Split &amp; merge.</strong> Break a stream into per-day or per-session files, or combine many exports into one — all CBOR→CBOR, no intermediate format.</span>
+      </li>
+    </ul>
+  </div>
+</section>
+
+<!-- command grid -->
+<section>
+  <div class="wrap">
+    <h2 class="section-title">/ commands</h2>
+    <div class="cmd-grid">
+      <div class="cmd-card"><div class="name">info &lt;files&gt;</div><div class="desc">Per-file summary: record counts, sizes, id/timestamp ranges, schema.</div></div>
+      <div class="cmd-card"><div class="name">ls &lt;files&gt;</div><div class="desc">List records as a table or NDJSON, with filtering.</div></div>
+      <div class="cmd-card"><div class="name">grep &lt;pattern&gt; &lt;files&gt;</div><div class="desc">Regex search across all string/bytes values in records.</div></div>
+      <div class="cmd-card"><div class="name">verify &lt;files&gt;</div><div class="desc">Integrity-check: fully decode every record, report corruption.</div></div>
+      <div class="cmd-card"><div class="name">extract &lt;files&gt;</div><div class="desc">Records to NDJSON or JSON array; project fields; dump bodies.</div></div>
+      <div class="cmd-card"><div class="name">repack &lt;input&gt;</div><div class="desc">Re-encode JSON (NDJSON or array) back to .cbor.zstd.</div></div>
+      <div class="cmd-card"><div class="name">edit &lt;files&gt;</div><div class="desc">Redact secrets, strip fields, drop/select — one pass.</div></div>
+      <div class="cmd-card"><div class="name">stats &lt;files&gt;</div><div class="desc">Aggregate tokens, cost, durations; by model or path.</div></div>
+      <div class="cmd-card"><div class="name">merge &lt;files&gt;</div><div class="desc">Combine many .cbor.zstd files into one (CBOR→CBOR).</div></div>
+      <div class="cmd-card"><div class="name">split &lt;files&gt;</div><div class="desc">Split into per-group files: day / session / model / path.</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- filters -->
+<section>
+  <div class="wrap">
+    <h2 class="section-title">/ shared filter flags</h2>
+    <p style="color:var(--text-dim); margin-bottom:20px;">
+      Every selection command (<code>ls</code>, <code>extract</code>, <code>grep</code>, <code>edit</code>, <code>stats</code>, <code>merge</code>, <code>split</code>) accepts these:
+    </p>
+    <table>
+      <thead><tr><th>Flag</th><th>Matches</th></tr></thead>
+      <tbody>
+        <tr><td><code>--id</code></td><td class="desc">record id or inclusive range (e.g. <code>5</code> or <code>5-10</code>)</td></tr>
+        <tr><td><code>--model</code></td><td class="desc">exact model name</td></tr>
+        <tr><td><code>--provider</code></td><td class="desc">model prefix before <code>/</code></td></tr>
+        <tr><td><code>--path</code></td><td class="desc">exact request path</td></tr>
+        <tr><td><code>--status</code></td><td class="desc">HTTP status code</td></tr>
+        <tr><td><code>--since</code> / <code>--until</code></td><td class="desc">ISO-8601 time range (bare date = inclusive whole day)</td></tr>
+        <tr><td><code>--date</code></td><td class="desc">exact calendar day (<code>YYYY-MM-DD</code>)</td></tr>
+        <tr><td><code>--invert</code></td><td class="desc">drop matching records instead of keeping them</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>MIT licensed · built by <a href="https://tangled.org/clee.sh">clee.sh</a></p>
+    <p class="disc">
+      Not affiliated with Tailscale. "Aperture" is a trademark of Tailscale; this
+      project references it only for descriptive accuracy.
+    </p>
+  </div>
+</footer>
+
+<script>
+function copyCmd(btn, cmd) {
+  navigator.clipboard.writeText(cmd).then(() => {
+    btn.textContent = 'copied!';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = 'copy';
+      btn.classList.remove('copied');
+    }, 1500);
+  });
+}
+</script>
+</body>
+</html>
