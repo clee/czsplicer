@@ -2866,6 +2866,97 @@ fn theme_consecutive_messages_collapse() {
     );
 }
 
+#[test]
+fn theme_renders_tool_call_details_not_just_count() {
+    // Two-record fixture where the assistant turn carries a tool_call.
+    // Record 1's REQUEST includes the assistant message (so rec1 is the
+    // assistant node's intro_rid) and rec1's RESPONSE carries the OpenAI
+    // tool_call. Record 2's request echoes the tool_result. Without rec1
+    // in the request path, the assistant node's intro_rid would be rec2,
+    // which holds the result, not the call (see mbox test-fixture gotcha).
+    let nd = format!(
+        "{}\n{}\n",
+        serde_json::json!({
+            "id":1,"model":"alpha/one","path":"/v1/x","status_code":200,
+            "timestamp":"2026-06-26T00:00:00Z",
+            "capture":{
+                "requestBody":body_with_messages("S",&[("user","run it"),("assistant","")]),
+                "responseBody":serde_json::json!({
+                    "choices":[{"message":{"role":"assistant","content":"","tool_calls":[
+                        {"id":"call_1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo hello\"}"}}
+                    ]}}]
+                }).to_string()
+            }
+        }).to_string(),
+        serde_json::json!({
+            "id":2,"model":"alpha/one","path":"/v1/x","status_code":200,
+            "timestamp":"2026-06-26T00:00:01Z",
+            "capture":{
+                "requestBody":serde_json::json!({
+                    "messages":[
+                        {"role":"system","content":"S"},
+                        {"role":"user","content":"run it"},
+                        {"role":"assistant","content":""},
+                        {"role":"tool","tool_call_id":"call_1","content":"hello\n"}
+                    ]
+                }).to_string()
+            }
+        }).to_string(),
+    );
+    let html = themed_html(&nd, &[]);
+    assert!(
+        html.contains("class=\"tool-call\""),
+        "tool-call <details> block rendered: {html}"
+    );
+    assert!(
+        html.contains("<code>bash</code>"),
+        "tool call name rendered"
+    );
+    assert!(html.contains("echo hello"), "tool call input rendered");
+    assert!(
+        html.contains("class=\"tool-result\""),
+        "tool-result block rendered"
+    );
+    assert!(html.contains("hello"), "tool result content rendered");
+}
+
+#[test]
+fn theme_loads_lowercase_dirs_and_styles_base_css() {
+    // Real-world themes vary path casing: Fluffy/Taz use a lowercase
+    // "incoming/" directory, Pushpin has no main.css (CSS lives in
+    // Styles/Base.css), and "Pretty Simple" uses Main.css (capital M).
+    // The Lowercase fixture exercises all three: incoming/Content.html
+    // (lowercase dir), Styles/Base.css (no main.css), so a render that
+    // finds the template AND inlines the base CSS proves both fixes.
+    let nd = rec(
+        1,
+        &body_with_messages("S", &[("user", "hi"), ("assistant", "hello")]),
+    );
+    let f = Fixture::from_ndjson(&nd);
+    let out = Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("thread")
+        .arg(&f.cbor_zstd)
+        .arg("--theme")
+        .arg("tests/fixtures/Lowercase.AdiumMessageStyle")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let html = String::from_utf8(out).unwrap();
+    // Template from incoming/Content.html (lowercase dir) was found:
+    assert!(
+        html.contains("class=\"lc"),
+        "lowercase incoming/Content.html resolved: {html}"
+    );
+    // Base CSS from Styles/Base.css was inlined into <style>:
+    assert!(
+        html.contains("background: #fff"),
+        "Styles/Base.css inlined into <style>: {html}"
+    );
+}
+
 // ===========================================================================
 // tree --html (built-in long-form renderer)
 // ===========================================================================
@@ -2969,6 +3060,52 @@ fn builtin_html_status_chips_colored() {
         html.contains("data-status=\"500\""),
         "5xx status chip present"
     );
+}
+
+#[test]
+fn builtin_html_renders_tool_call_details() {
+    // Same fixture shape as theme_renders_tool_call_details_not_just_count:
+    // rec1 request includes the assistant message (so intro_rid=1) and its
+    // response carries the OpenAI tool_call; rec2 echoes the tool_result.
+    // The built-in renderer must render the call name + input + result.
+    let nd = format!(
+        "{}\n{}\n",
+        serde_json::json!({
+            "id":1,"model":"alpha/one","path":"/v1/x","status_code":200,
+            "timestamp":"2026-06-26T00:00:00Z",
+            "capture":{
+                "requestBody":body_with_messages("S",&[("user","run it"),("assistant","")]),
+                "responseBody":serde_json::json!({
+                    "choices":[{"message":{"role":"assistant","content":"","tool_calls":[
+                        {"id":"call_1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo hi\"}"}}
+                    ]}}]
+                }).to_string()
+            }
+        }).to_string(),
+        serde_json::json!({
+            "id":2,"model":"alpha/one","path":"/v1/x","status_code":200,
+            "timestamp":"2026-06-26T00:00:01Z",
+            "capture":{
+                "requestBody":serde_json::json!({
+                    "messages":[
+                        {"role":"system","content":"S"},
+                        {"role":"user","content":"run it"},
+                        {"role":"assistant","content":""},
+                        {"role":"tool","tool_call_id":"call_1","content":"hi\n"}
+                    ]
+                }).to_string()
+            }
+        }).to_string(),
+    );
+    let html = builtin_html(&nd, &[]);
+    assert!(
+        html.contains("class=\"tool-call\""),
+        "tool-call block: {html}"
+    );
+    assert!(html.contains("<code>bash</code>"), "call name rendered");
+    assert!(html.contains("echo hi"), "call input rendered");
+    assert!(html.contains("class=\"tool-result\""), "tool-result block");
+    assert!(html.contains("hi"), "result content rendered");
 }
 
 #[test]

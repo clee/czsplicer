@@ -100,3 +100,58 @@ pub fn sender_color(sender: &str) -> &'static str {
     let n = u64::from_le_bytes(h.as_bytes()[0..8].try_into().unwrap_or([0u8; 8]));
     PALETTE[(n as usize) % PALETTE.len()]
 }
+
+/// Resolve the tool-event record anchors for an assistant node, for renderers
+/// that emit tool-call/result details.
+///
+/// Tool *calls* live in a record's **response** body. The record whose
+/// response generated an assistant turn is the one whose **request** first
+/// included that assistant message in its history — i.e. the node's
+/// `intro_rid`. (The same record's response carries the call.) So the call
+/// anchor is `node.intro_rid`, falling back to the last `record_id` only if
+/// intro is absent.
+///
+/// Tool *results* live in the **next** request's echoed messages. The next
+/// request is the one that introduces this node's first child (or, in a
+/// linear chain, the next `record_id`). We prefer the first child's
+/// `intro_rid` and fall back to the record after `intro_rid` in
+/// `record_ids`.
+///
+/// Both anchors are looked up against the optional `records` metadata map
+/// (keyed by record id as a string). Returns `(call_rec, result_rec)`.
+///
+/// This replaces the older `record_ids[depth]` / `record_ids[depth+1]`
+/// positional scheme, which silently dropped calls whenever the assistant
+/// node's `record_ids` didn't include the call-bearing record (common when
+/// a branch or re-introduction narrows the record_ids list).
+pub fn tool_event_records<'a>(
+    node: &'a Json,
+    records: Option<&'a serde_json::Map<String, Json>>,
+) -> (Option<&'a Json>, Option<&'a Json>) {
+    let lookup = |id: Option<i64>| id.and_then(|id| records.and_then(|m| m.get(&id.to_string())));
+    let intro_rid = node.get("intro_rid").and_then(|v| v.as_i64());
+    let call_rec = lookup(intro_rid.or_else(|| {
+        node.get("record_ids")
+            .and_then(|v| v.as_array())
+            .and_then(|ids| ids.last().and_then(|v| v.as_i64()))
+    }));
+    // Result: prefer the first child's intro_rid (the next request), else
+    // the record after intro_rid in this node's record_ids.
+    let result_id = node
+        .get("children")
+        .and_then(|v| v.as_array())
+        .and_then(|kids| kids.first())
+        .and_then(|c| c.get("intro_rid"))
+        .and_then(|v| v.as_i64())
+        .or_else(|| {
+            // Fall back: record_ids[index after intro_rid].
+            let ids = node.get("record_ids").and_then(|v| v.as_array())?;
+            let after = intro_rid
+                .and_then(|rid| ids.iter().position(|v| v.as_i64() == Some(rid)))
+                .map(|p| p + 1)
+                .unwrap_or(1);
+            ids.get(after).and_then(|v| v.as_i64())
+        });
+    let result_rec = lookup(result_id);
+    (call_rec, result_rec)
+}

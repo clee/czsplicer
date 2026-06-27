@@ -73,7 +73,14 @@ impl Theme {
             &["Outgoing/NextContent.html", "Incoming/NextContent.html"],
         );
         let status = read_template_opt(&res, &["Status.html"]);
-        let main_css = read_template_opt(&res, &["main.css"]).unwrap_or_default();
+        // CSS fallback chain: main.css is the Adium convention, but some
+        // themes (e.g. Pushpin) put their base CSS in Styles/Base.css.
+        // @import url("...") references inside the CSS are inlined so the
+        // rendered file is self-contained (no server to resolve relative
+        // URLs against).
+        let main_css = read_template_opt(&res, &["main.css", "Styles/Base.css"])
+            .map(|css| inline_css_imports(&css, &res))
+            .unwrap_or_default();
 
         // Variants: <Name>.css under Variants/, keyed by stem.
         let mut variants = BTreeMap::new();
@@ -151,7 +158,14 @@ impl Theme {
         match variant {
             Some(name) => match self.variants.get(name) {
                 Some(p) => match fs::read_to_string(p) {
-                    Ok(css) => format!("\n/* variant: {name} */\n{css}"),
+                    Ok(css) => {
+                        // Inline any relative @imports (variants commonly
+                        // import "../style/foo.css"); resolve against the
+                        // variant file's own directory.
+                        let base = p.parent().unwrap_or_else(|| Path::new("."));
+                        let inlined = inline_css_imports(&css, base);
+                        format!("\n/* variant: {name} */\n{inlined}")
+                    }
                     Err(e) => format!("\n/* failed to read variant {name}: {e} */\n"),
                 },
                 None => {
@@ -199,16 +213,35 @@ impl Theme {
                 _ => (role.to_string(), "incoming"),
             };
             let consecutive = prev_sender.as_deref() == Some(sender.as_str());
-            let mut message = node
+            let message_text = node
                 .get("preview")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            // When the assistant only issued tool calls, the preview/content
-            // is empty. Show a placeholder instead of a blank bubble.
-            if message.is_empty() && role == "assistant" {
-                message = tool_placeholder(meta_rec);
+            // For assistant turns, build tool-call/result HTML (from
+            // tool_events) to append to the message. Adium themes have no
+            // separate %tool_calls% keyword, so the HTML is concatenated onto
+            // the (escaped) message text at substitution time. When the turn
+            // has no text content (tool-only), this is the whole message.
+            let mut tools_html = String::new();
+            if role == "assistant" {
+                let (call_rec, result_rec) = crate::render::tool_event_records(node, records);
+                tools_html = tool_events_html(call_rec, result_rec);
+                if tools_html.is_empty() && message_text.is_empty() {
+                    // No text and no renderable tool events: keep the count
+                    // placeholder so the bubble isn't blank.
+                    tools_html = escape_html(&tool_placeholder(meta_rec));
+                }
             }
+            // Escape the text portion but keep tool HTML raw (it's already
+            // escaped internally by tool_events_html).
+            let message_field = if tools_html.is_empty() {
+                escape_html(&message_text)
+            } else if message_text.is_empty() {
+                tools_html
+            } else {
+                format!("{}\n\n{}", escape_html(&message_text), tools_html)
+            };
             let time = node_time(meta_rec);
 
             // Pick template: NextContent for consecutive, else Content.
@@ -229,7 +262,7 @@ impl Theme {
             let substituted = substitute(
                 template,
                 &Subst {
-                    message: &escape_html(&message),
+                    message: &message_field,
                     sender: &escape_html(&sender),
                     sender_color: color,
                     time: &time,
@@ -315,6 +348,7 @@ fn resolve_keyword<'a>(kw: &str, s: &'a Subst) -> Option<&'a str> {
         "service" => Some(s.service),
         // Keywords we recognize but don't populate in the spike.
         "userIconPath"
+        | "userIcons"
         | "senderStatusIcon"
         | "messageDirection"
         | "variant"
@@ -353,12 +387,131 @@ fn read_template_opt(res: &Path, chain: &[&str]) -> Option<String> {
                 .with_context(|| format!("reading {}", p.display()))
                 .ok();
         }
+        // Case-insensitive fallback: many real themes ship mixed-case paths
+        // (e.g. "Pretty Simple" uses Main.css; Fluffy uses incoming/Content.html
+        // with a lowercase "incoming/"). Walk every path segment
+        // case-insensitively.
+        if let Some(content) = read_case_insensitive(res, rel) {
+            return Some(content);
+        }
     }
     None
 }
 
-/// When an assistant message has no text content (e.g. it only issued tool
-/// calls), produce a placeholder string instead of an empty bubble.
+/// Resolve `rel` (a forward-slash relative path like "Incoming/Content.html")
+/// against `base` case-insensitively on every segment, returning file contents
+/// on a match. Returns None if any segment has no case-insensitive match or the
+/// final path isn't a file.
+fn read_case_insensitive(base: &Path, rel: &str) -> Option<String> {
+    let mut cur = base.to_path_buf();
+    for seg in rel.split('/') {
+        let entries = fs::read_dir(&cur).ok()?;
+        let hit = entries
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(seg))?;
+        cur = hit.path();
+    }
+    if cur.is_file() {
+        fs::read_to_string(&cur)
+            .with_context(|| format!("reading {}", cur.display()))
+            .ok()
+    } else {
+        None
+    }
+}
+
+/// Recursively inline relative `@import url("...")` references in a CSS
+/// string, so the rendered HTML is self-contained. Relative paths resolve
+/// against `base_dir` (the theme's `Contents/Resources`). Absolute/remote
+/// URLs (http://, https://, data:) are left untouched — many themes phone
+/// home to update-check URLs that are long dead, and we don't want to fetch.
+///
+/// Guards against cycles with a small visit cap (8 levels).
+fn inline_css_imports(css: &str, base_dir: &Path) -> String {
+    inline_css_imports_inner(css, base_dir, 0)
+}
+
+fn inline_css_imports_inner(css: &str, base_dir: &Path, depth: usize) -> String {
+    if depth >= 8 {
+        return css.to_string();
+    }
+    // Match: @import [url(]["']path["'][)];
+    let re = regex::Regex::new(r#"(?i)@import\s+(?:url\(\s*)?["']([^"']+)["']\s*\)?\s*;"#).unwrap();
+    re.replace_all(css, |caps: &regex::Captures| {
+        let target = &caps[1];
+        // Skip absolute URLs — leave them as-is (or effectively drop, since
+        // browsers won't fetch http:// update URLs from a local file either).
+        if target.starts_with("http://")
+            || target.starts_with("https://")
+            || target.starts_with("//")
+            || target.starts_with("data:")
+        {
+            // Replace with a comment so the line doesn't break parsing.
+            return format!("/* @import skipped (remote): {} */", target);
+        }
+        // Resolve relative to base_dir. Normalize "./foo" and "foo".
+        let cleaned = target.trim_start_matches("./").trim_start_matches(".\\");
+        let path = base_dir.join(cleaned);
+        if path.is_file() {
+            if let Ok(inner) = fs::read_to_string(&path) {
+                // Variants live in Variants/ and import "../style/foo.css";
+                // resolve nested imports against the importing file's dir.
+                let nested_base = path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| base_dir.to_path_buf());
+                return inline_css_imports_inner(&inner, &nested_base, depth + 1);
+            }
+        }
+        // Unresolvable: replace with a comment rather than leave the @import.
+        format!("/* @import skipped (not found): {} */", target)
+    })
+    .into_owned()
+}
+
+/// Render a record's tool events as HTML `<details>` blocks (calls then
+/// results), mirroring the built-in renderer. Appended to the message text
+/// for assistant turns. Returns empty if no renderable events.
+fn tool_events_html(call_rec: Option<&Json>, result_rec: Option<&Json>) -> String {
+    use crate::render::escape_html;
+    let mut out = String::new();
+    if let Some(events) = call_rec
+        .and_then(|r| r.get("tool_events"))
+        .and_then(|v| v.as_array())
+    {
+        for ev in events {
+            if ev.get("kind").and_then(|v| v.as_str()) == Some("call") {
+                let name = ev.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+                let input = ev.get("input").and_then(|v| v.as_str()).unwrap_or("");
+                out.push_str(&format!(
+                    "<details class=\"tool-call\"><summary>tool call: <code>{}</code></summary><pre class=\"tool-input\">{}</pre></details>",
+                    escape_html(name),
+                    escape_html(input)
+                ));
+            }
+        }
+    }
+    if let Some(events) = result_rec
+        .and_then(|r| r.get("tool_events"))
+        .and_then(|v| v.as_array())
+    {
+        for ev in events {
+            if ev.get("kind").and_then(|v| v.as_str()) == Some("result") {
+                let content = ev.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                if !content.is_empty() {
+                    out.push_str(&format!(
+                        "<details class=\"tool-result\"><summary>tool result</summary><pre class=\"tool-output\">{}</pre></details>",
+                        escape_html(content)
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// When an assistant message has no text content and no renderable tool
+/// events, produce a count placeholder instead of an empty bubble.
 fn tool_placeholder(rec: Option<&Json>) -> String {
     let Some(rec) = rec else {
         return String::new();

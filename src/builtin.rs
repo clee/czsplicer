@@ -200,27 +200,14 @@ fn render_path(path: &[&Json], records: Option<&serde_json::Map<String, Json>>) 
         };
         let meta_rec = meta_rid.and_then(|id| records.and_then(|rmap| rmap.get(&id.to_string())));
 
-        // Tool-event anchors for assistant turns. In a linear chain each
-        // record adds one message, so:
-        //   record_ids[i]     → response has the tool CALL for this turn
-        //   record_ids[i+1]   → request echoes the tool RESULT for that call
-        // We render call-then-result in the correct order. Non-assistant
-        // turns never carry tool events.
+        // Tool-event anchors for assistant turns. The record whose request
+        // first included this assistant message (intro_rid) is the one whose
+        // response carried the CALL; the next request (first child's
+        // intro_rid) echoes the RESULT. Shared helper in render.rs replaces
+        // the older record_ids[depth] positional scheme (which silently
+        // dropped calls when record_ids didn't cover the call-bearing record).
         let (call_rec, result_rec) = if role == "assistant" {
-            let ids = node.get("record_ids").and_then(|v| v.as_array());
-            let call = ids
-                .and_then(|ids| {
-                    let idx = i.min(ids.len().saturating_sub(1));
-                    ids.get(idx).and_then(|v| v.as_i64())
-                })
-                .and_then(|id| records.and_then(|rmap| rmap.get(&id.to_string())));
-            let result = ids
-                .and_then(|ids| {
-                    let idx = (i + 1).min(ids.len().saturating_sub(1));
-                    ids.get(idx).and_then(|v| v.as_i64())
-                })
-                .and_then(|id| records.and_then(|rmap| rmap.get(&id.to_string())));
-            (call, result)
+            crate::render::tool_event_records(node, records)
         } else {
             (None, None)
         };
