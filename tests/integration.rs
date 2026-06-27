@@ -183,6 +183,113 @@ fn ls_filter_by_login_name() {
     assert_eq!(recs.len(), 2);
 }
 
+#[test]
+fn ls_filter_by_client_prefix() {
+    let f = fixture();
+    let out = f
+        .cmd()
+        .arg("ls")
+        .arg(&f.cbor_zstd)
+        .arg("--json")
+        .arg("--client")
+        .arg("maki")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let recs: Vec<serde_json::Value> = read_ndjson(std::str::from_utf8(&out).unwrap());
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0]["id"].as_i64(), Some(1));
+}
+
+#[test]
+fn ls_filter_by_client_case_insensitive() {
+    // Query casing differs from the stored `Aperture-Chat/1.0` (record 3).
+    let f = fixture();
+    let out = f
+        .cmd()
+        .arg("ls")
+        .arg(&f.cbor_zstd)
+        .arg("--json")
+        .arg("--client")
+        .arg("APERTURE")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let recs: Vec<serde_json::Value> = read_ndjson(std::str::from_utf8(&out).unwrap());
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0]["id"].as_i64(), Some(3));
+}
+
+#[test]
+fn ls_filter_by_client_repeatable_or() {
+    let f = fixture();
+    let out = f
+        .cmd()
+        .arg("ls")
+        .arg(&f.cbor_zstd)
+        .arg("--json")
+        .arg("--client")
+        .arg("maki")
+        .arg("--client")
+        .arg("aperture")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let recs: Vec<serde_json::Value> = read_ndjson(std::str::from_utf8(&out).unwrap());
+    let mut ids: Vec<i64> = recs.iter().filter_map(|r| r["id"].as_i64()).collect();
+    ids.sort();
+    assert_eq!(ids, vec![1, 3]);
+}
+
+#[test]
+fn ls_filter_by_client_skips_null_headers() {
+    // Record 2 has requestHeaders: null — must not match any --client.
+    let f = fixture();
+    let out = f
+        .cmd()
+        .arg("ls")
+        .arg(&f.cbor_zstd)
+        .arg("--json")
+        .arg("--client")
+        .arg("zzz-no-such-client")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let recs: Vec<serde_json::Value> = read_ndjson(std::str::from_utf8(&out).unwrap());
+    assert!(recs.is_empty());
+}
+
+#[test]
+fn ls_filter_by_client_invert() {
+    let f = fixture();
+    let out = f
+        .cmd()
+        .arg("ls")
+        .arg(&f.cbor_zstd)
+        .arg("--json")
+        .arg("--client")
+        .arg("maki")
+        .arg("--invert")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let recs: Vec<serde_json::Value> = read_ndjson(std::str::from_utf8(&out).unwrap());
+    let mut ids: Vec<i64> = recs.iter().filter_map(|r| r["id"].as_i64()).collect();
+    ids.sort();
+    // Drop the maki record (id 1); keep ids 2 and 3.
+    assert_eq!(ids, vec![2, 3]);
+}
+
 // ===========================================================================
 // extract
 // ===========================================================================

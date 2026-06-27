@@ -19,6 +19,9 @@ pub struct Filter {
     pub statuses: Vec<i64>,
     pub api_types: Vec<String>,
     pub login_names: Vec<String>,
+    /// Lowercased client/user-agent prefixes (from `--client`). A record matches
+    /// when its `capture.requestHeaders.User-Agent` starts with any of these.
+    pub clients: Vec<String>,
     pub since: Option<String>,
     pub until: Option<String>,
     pub date: Option<String>,
@@ -96,6 +99,15 @@ impl Filter {
                 return false;
             }
         }
+        if !self.clients.is_empty() {
+            let Some(ua) = user_agent(rec) else {
+                return false;
+            };
+            let ua = ua.to_lowercase();
+            if !self.clients.iter().any(|x| ua.starts_with(x)) {
+                return false;
+            }
+        }
         if self.since.is_some() || self.until.is_some() || self.date.is_some() {
             let Some(ts) = format::rec_str(rec, "timestamp") else {
                 return false;
@@ -105,6 +117,19 @@ impl Filter {
             }
         }
         true
+    }
+}
+
+/// Extract the first `User-Agent` string from `capture.requestHeaders`.
+/// Headers are absent or null on some records; returns `None` then. The header
+/// value is a CBOR array (e.g. `["maki/v0.3.20"]`) per HTTP multi-header
+/// convention, so we take the first element.
+fn user_agent(rec: &ciborium::Value) -> Option<String> {
+    let v = format::path_get(rec, "capture.requestHeaders.User-Agent")?;
+    match v {
+        ciborium::Value::Array(a) => a.first().and_then(format::as_str),
+        ciborium::Value::Text(s) => Some(s.clone()),
+        _ => None,
     }
 }
 
@@ -170,6 +195,11 @@ pub struct FilterArgs {
     /// Keep/drop records by identity.login_name. Repeatable.
     #[arg(long = "login-name", value_name = "NAME")]
     pub login_name: Vec<String>,
+    /// Keep/drop records whose `User-Agent` (capture.requestHeaders) starts with
+    /// this prefix, case-insensitive. Repeatable. e.g. `--client maki`,
+    /// `--client Aperture-Chat`.
+    #[arg(long, value_name = "PREFIX")]
+    pub client: Vec<String>,
     /// Keep records at or after this ISO-8601 time (e.g. `2026-05-30` or
     /// `2026-05-30T12:00:00Z`). Prefix comparison.
     #[arg(long, value_name = "TIME")]
@@ -200,6 +230,7 @@ impl FilterArgs {
             statuses: self.status.clone(),
             api_types: self.api_type.clone(),
             login_names: self.login_name.clone(),
+            clients: self.client.iter().map(|s| s.to_lowercase()).collect(),
             since: self.since.clone(),
             until: self.until.clone(),
             date: self.date.clone(),

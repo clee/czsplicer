@@ -142,6 +142,7 @@ Every selection command (`ls`, `extract`, `grep`, `edit`, `stats`, `merge`,
 | `--status CODE` | HTTP status code (repeatable) |
 | `--api-type TYPE` | api_type (repeatable) |
 | `--login-name NAME` | identity.login_name (repeatable) |
+| `--client PREFIX` | User-Agent prefix, case-insensitive (repeatable) |
 | `--since TIME` | `>=` this ISO-8601 time (prefix compare) |
 | `--until TIME` | `<=` this time (bare date = inclusive whole day) |
 | `--date YYYY-MM-DD` | exact calendar day |
