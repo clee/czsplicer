@@ -25,6 +25,7 @@ serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 anyhow = "1"
 regex = "1"
 base64 = "0.22"
+blake3 = "1"
 
 [dev-dependencies]
 assert_cmd = "2"

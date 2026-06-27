@@ -40,6 +40,7 @@ Commands:
   merge    Merge many `.cbor.zstd` files into one (CBOR -> CBOR, streaming)
   split    Split one stream into per-group `.cbor.zstd` files (by day/session/model/path)
   stats    Aggregate stats: tokens, cost, durations, by-model / by-path
+  thread   Reconstruct conversation threads (branching included); export as JSON
 ```
 
 Run `czsplicer <command> --help` for full flags.
@@ -114,12 +115,31 @@ czsplicer merge prod/ -o all.cbor.zstd
 # Split into per-day files
 czsplicer split all.cbor.zstd --by day --out-dir days/
 
-# Split into per-session files (session_id is auto-populated by Aperture;
-# --min-records defaults to 2 to skip single-request throwaways)
+# Split into per-session files. Aperture gives every request a unique
+# session_id, so --by session groups by conversation root (first message
+# hash); --min-records defaults to 2 to skip single-request throwaways.
 czsplicer split all.cbor.zstd --by session --out-dir sessions/
 
 # Also: --by model, --by provider, --by path. Use --json for a manifest of the output files.
 ```
+
+### Threading
+
+Reconstruct conversation branches from each request's echoed message history.
+Branch points (where the user went back and took a different path) are recovered
+automatically; the trie keys on normalized message-content hashes, so a string
+user message and its block-form continuation collapse to one node.
+
+```sh
+# Default: JSON forest (roots, nodes, record_ids, tool_events) to stdout.
+czsplicer thread prod/
+
+# Redact secrets in the reconstructed output (same presets as `edit`).
+czsplicer thread prod/ --redact-preset all -o threads.json
+```
+
+Redaction runs on message bodies and tool text *before* reconstruction, so
+secrets never reach the output.
 
 ### Integrity check
 
@@ -131,7 +151,7 @@ czsplicer verify prod/ --json
 ## Filtering
 
 Every selection command (`ls`, `extract`, `grep`, `edit`, `stats`, `merge`,
-`split`) shares the same filter flags:
+`split`, `thread`) shares the same filter flags:
 
 | Flag | Matches |
 |------|---------|
@@ -169,7 +189,7 @@ Directory arguments are expanded to their sorted `*.cbor.zstd` contents, so
 ## Development
 
 ```sh
-cargo test                       # 65 integration tests (synthetic fixtures)
+cargo test                       # 98 integration tests (synthetic fixtures)
 cargo test -- --ignored           # + lossless round-trip over real prod/ exports
 ```
 

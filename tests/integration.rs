@@ -1304,6 +1304,82 @@ fn split_by_session_min_records_1_emits_all() {
 }
 
 #[test]
+fn split_by_session_groups_by_first_user_message_not_session_id() {
+    // Aperture gives every request a unique session_id, so --by session must
+    // group by the conversation root (first user message), not the raw field.
+    // Here four records share NO session_ids but form two conversations:
+    //   - "how do I bake bread" asked twice (a retry), same system prompt
+    //   - "how do I cook rice" asked twice, same system prompt
+    // They must split into 2 files (not 4), titled by the first user message.
+    let body_bread_a = serde_json::json!({"messages":[
+        {"role":"system","content":"You are a chef."},
+        {"role":"user","content":"how do I bake bread"}
+    ]})
+    .to_string();
+    let body_bread_b = serde_json::json!({"messages":[
+        {"role":"system","content":"You are a chef."},
+        {"role":"user","content":"how do I bake bread"},
+        {"role":"assistant","content":"knead it"},
+        {"role":"user","content":"how long"}
+    ]})
+    .to_string();
+    let body_rice_a = serde_json::json!({"messages":[
+        {"role":"system","content":"You are a chef."},
+        {"role":"user","content":"how do I cook rice"}
+    ]})
+    .to_string();
+    let body_rice_b = serde_json::json!({"messages":[
+        {"role":"system","content":"You are a chef."},
+        {"role":"user","content":"how do I cook rice"},
+        {"role":"assistant","content":"rinse it"},
+        {"role":"user","content":"then what"}
+    ]})
+    .to_string();
+    let nd = format!(
+        "{}\n{}\n{}\n{}\n",
+        serde_json::json!({"id":1,"model":"m","path":"/p","session_id":"UNIQUE-1","status_code":200,"capture":{"requestBody":body_bread_a}}).to_string(),
+        serde_json::json!({"id":2,"model":"m","path":"/p","session_id":"UNIQUE-2","status_code":200,"capture":{"requestBody":body_rice_a}}).to_string(),
+        serde_json::json!({"id":3,"model":"m","path":"/p","session_id":"UNIQUE-3","status_code":200,"capture":{"requestBody":body_bread_b}}).to_string(),
+        serde_json::json!({"id":4,"model":"m","path":"/p","session_id":"UNIQUE-4","status_code":200,"capture":{"requestBody":body_rice_b}}).to_string(),
+    );
+    let f = Fixture::from_ndjson(&nd);
+    let out_dir = f.dir.join("sessions");
+    f.cmd()
+        .arg("split")
+        .arg(&f.cbor_zstd)
+        .arg("--by")
+        .arg("session")
+        .arg("--out-dir")
+        .arg(&out_dir)
+        .assert()
+        .success();
+    let files: Vec<String> = fs::read_dir(&out_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_str().unwrap().to_string())
+        .collect();
+    // Two conversations, each with 2 records (>= default min_records=2).
+    assert_eq!(
+        files.len(),
+        2,
+        "grouped by first user message, not session_id: {files:?}"
+    );
+    // Filenames are titled by the first user message (not the system prompt).
+    let joined = files.join(" ");
+    assert!(
+        joined.contains("how_do_I_bake_bread"),
+        "bread conversation titled by user message: {joined}"
+    );
+    assert!(
+        joined.contains("how_do_I_cook_rice"),
+        "rice conversation titled by user message: {joined}"
+    );
+    assert!(
+        !joined.contains("You_are_a_chef"),
+        "system prompt must NOT be the title: {joined}"
+    );
+}
+
+#[test]
 fn split_by_model() {
     let f = rich_fixture();
     let out_dir = f.dir.join("models");
@@ -2290,4 +2366,381 @@ fn prod_roundtrip_is_lossless_on_small_files() {
         assert_eq!(av, bv, "round-trip mismatch for {}", fz.display());
         println!("OK: {} ({} records)", fz.display(), av.len());
     }
+}
+
+// ===========================================================================
+// thread (JSON reconstruction)
+// ===========================================================================
+
+/// the parsed JSON forest.
+fn thread_json(ndjson: &str) -> serde_json::Value {
+    let f = Fixture::from_ndjson(ndjson);
+    let out = Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("thread")
+        .arg(&f.cbor_zstd)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&out).expect("valid json forest")
+}
+
+/// Collect all (role, depth) nodes in tree order via iterative DFS.
+fn flatten(trees: &serde_json::Value) -> Vec<(String, usize, usize)> {
+    let mut out = Vec::new();
+    let mut stack: Vec<(&serde_json::Value, usize)> = trees
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| (t, 0usize))
+        .collect();
+    while let Some((n, dp)) = stack.pop() {
+        let role = n["role"].as_str().unwrap_or("").to_string();
+        let nkids = n["children"].as_array().map(|a| a.len()).unwrap_or(0);
+        out.push((role, dp, nkids));
+        if let Some(kids) = n["children"].as_array() {
+            for c in kids.iter().rev() {
+                stack.push((c, dp + 1));
+            }
+        }
+    }
+    out
+}
+
+/// A request body with the given message history (system + user/assistant turns).
+/// Returns the JSON string for `capture.requestBody`.
+fn body_with_messages(system: &str, turns: &[(&str, &str)]) -> String {
+    let mut msgs = vec![serde_json::json!({"role":"system","content":system})];
+    for (role, content) in turns {
+        msgs.push(serde_json::json!({"role":role,"content":content}));
+    }
+    serde_json::json!({"messages":msgs,"model":"test/model"}).to_string()
+}
+
+fn rec(id: i64, body: &str) -> String {
+    serde_json::json!({
+        "id":id,
+        "model":"test/model",
+        "path":"/v1/messages",
+        "status_code":200,
+        "capture":{"requestBody":body}
+    })
+    .to_string()
+}
+
+#[test]
+fn thread_linear_chain_is_single_path() {
+    // Three records, each extending the same conversation: a single tree,
+    // no branches, deepest path = 4 messages (sys + u + a + u).
+    let nd = format!(
+        "{}\n{}\n{}\n",
+        rec(1, &body_with_messages("S", &[("user", "hello")])),
+        rec(
+            2,
+            &body_with_messages(
+                "S",
+                &[("user", "hello"), ("assistant", "hi"), ("user", "bye")]
+            )
+        ),
+        rec(
+            3,
+            &body_with_messages(
+                "S",
+                &[
+                    ("user", "hello"),
+                    ("assistant", "hi"),
+                    ("user", "bye"),
+                    ("assistant", "bye")
+                ]
+            )
+        ),
+    );
+    let j = thread_json(&nd);
+    assert_eq!(j["records_total"].as_i64(), Some(3));
+    assert_eq!(j["root_count"].as_i64(), Some(1), "one conversation root");
+    assert_eq!(
+        j["branch_count"].as_i64(),
+        Some(0),
+        "no branches in a chain"
+    );
+    // The single root's record_ids should include all three records.
+    let root = &j["trees"][0];
+    assert_eq!(root["record_ids"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn thread_detects_branch_divergence() {
+    // Two records share a prefix [sys, u1] then diverge: one continues with
+    // assistant "A", the other with assistant "B". This is a real branch.
+    let nd = format!(
+        "{}\n{}\n",
+        rec(
+            1,
+            &body_with_messages("S", &[("user", "q"), ("assistant", "answer-one")])
+        ),
+        rec(
+            2,
+            &body_with_messages("S", &[("user", "q"), ("assistant", "answer-two")])
+        ),
+    );
+    let j = thread_json(&nd);
+    assert_eq!(j["records_total"].as_i64(), Some(2));
+    assert_eq!(j["root_count"].as_i64(), Some(1));
+    assert_eq!(
+        j["branch_count"].as_i64(),
+        Some(1),
+        "prefix divergence is a branch"
+    );
+    // The branch node is the assistant turn at depth 2, with 2 children.
+    let root = &j["trees"][0];
+    assert_eq!(root["role"].as_str(), Some("system"));
+    assert_eq!(
+        root["children"].as_array().unwrap().len(),
+        1,
+        "single user turn under system"
+    );
+    let user = &root["children"][0];
+    assert_eq!(
+        user["children"].as_array().unwrap().len(),
+        2,
+        "two divergent assistant turns"
+    );
+}
+
+#[test]
+fn thread_separate_system_prompts_are_separate_roots() {
+    // Different system prompts => different roots, not a branch.
+    let nd = format!(
+        "{}\n{}\n",
+        rec(1, &body_with_messages("SYS-A", &[("user", "hi")])),
+        rec(2, &body_with_messages("SYS-B", &[("user", "hi")])),
+    );
+    let j = thread_json(&nd);
+    assert_eq!(
+        j["root_count"].as_i64(),
+        Some(2),
+        "two distinct system prompts"
+    );
+    assert_eq!(j["branch_count"].as_i64(), Some(0));
+}
+
+#[test]
+fn thread_string_and_block_content_hash_identically() {
+    // A bare-string user message and the equivalent [{type:text}] block form
+    // must hash to the same node, so the two records form a chain, not a branch.
+    let msgs_str = serde_json::json!({
+        "messages":[
+            {"role":"system","content":"S"},
+            {"role":"user","content":"same question"}
+        ]
+    })
+    .to_string();
+    // Record 2 extends record 1's path by one assistant turn. If the string
+    // and block user messages DIDN'T hash equally, we'd get 2 roots instead.
+    let nd = format!(
+        "{}\n{}\n",
+        rec(1, &msgs_str),
+        rec(
+            2,
+            &serde_json::json!({
+                "messages":[
+                    {"role":"system","content":"S"},
+                    {"role":"user","content":[{"type":"text","text":"same question"}]},
+                    {"role":"assistant","content":"reply"}
+                ]
+            })
+            .to_string()
+        ),
+    );
+    let j = thread_json(&nd);
+    assert_eq!(
+        j["root_count"].as_i64(),
+        Some(1),
+        "string and block content share a root"
+    );
+    assert_eq!(j["branch_count"].as_i64(), Some(0));
+}
+
+#[test]
+fn thread_records_without_messages_are_skipped() {
+    // A record with no capture.requestBody should not crash and should be
+    // excluded from the message count, but still counted in records_total.
+    let nd = format!(
+        "{}\n{}\n",
+        rec(1, &body_with_messages("S", &[("user", "hi")])),
+        serde_json::json!({"id":2,"model":"test/model","path":"/v1/messages","status_code":500,"capture":{}}).to_string(),
+    );
+    let j = thread_json(&nd);
+    assert_eq!(j["records_total"].as_i64(), Some(2));
+    assert_eq!(j["records_with_messages"].as_i64(), Some(1));
+    assert_eq!(j["root_count"].as_i64(), Some(1));
+    // Per-record metadata is captured even for the empty-body 500 record.
+    assert_eq!(j["records"]["2"]["status_code"].as_i64(), Some(500));
+    assert_eq!(j["records"]["1"]["status_code"].as_i64(), Some(200));
+}
+
+#[test]
+fn thread_record_metadata_carries_status_tools_and_timestamp() {
+    // Record 1: a 200 with an assistant response that issues a tool_call
+    // (OpenAI choices[0].message.tool_calls shape). Record 2: a 429 failure
+    // whose request echoes a tool_result block (Anthropic shape).
+    let nd = format!(
+        "{}\n{}\n",
+        serde_json::json!({
+            "id":1,"model":"alpha/one","path":"/v1/x","status_code":200,
+            "timestamp":"2026-06-26T00:00:00Z","duration_ms":1234,"api_type":"oai_completions",
+            "capture":{
+                "requestBody":body_with_messages("S",&[("user","do thing")]),
+                "responseBody":serde_json::json!({
+                    "choices":[{"message":{"role":"assistant","content":"ok","tool_calls":[
+                        {"id":"call_1","type":"function","function":{"name":"f","arguments":"{}"}}
+                    ]}}]
+                }).to_string()
+            }
+        }).to_string(),
+        serde_json::json!({
+            "id":2,"model":"alpha/one","path":"/v1/x","status_code":429,
+            "timestamp":"2026-06-26T00:00:01Z","api_type":"ant_messages",
+            "capture":{
+                "requestBody":serde_json::json!({
+                    "messages":[
+                        {"role":"system","content":"S"},
+                        {"role":"user","content":[{"type":"text","text":"q"}]},
+                        {"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"f","input":{}}]},
+                        {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"done"}]}
+                    ]
+                }).to_string()
+            }
+        }).to_string(),
+    );
+    let j = thread_json(&nd);
+    let r1 = &j["records"]["1"];
+    let r2 = &j["records"]["2"];
+    assert_eq!(r1["status_code"].as_i64(), Some(200));
+    assert_eq!(r1["duration_ms"].as_i64(), Some(1234));
+    assert_eq!(
+        r1["tool_calls"].as_i64(),
+        Some(1),
+        "OpenAI tool_call counted"
+    );
+    assert_eq!(
+        r2["status_code"].as_i64(),
+        Some(429),
+        "failure status preserved"
+    );
+    assert_eq!(
+        r2["tool_results"].as_i64(),
+        Some(1),
+        "Anthropic tool_result block counted"
+    );
+}
+
+#[test]
+fn thread_tool_results_count_only_new_turn_not_history() {
+    // Regression: a request that echoes a long prior history with many
+    // tool_result blocks must count only the NEW ones (after the last
+    // assistant message), not the accumulated total. Otherwise every turn
+    // in a long thread reports the same growing number.
+    let nd = serde_json::json!({
+        "id":1,"model":"m","path":"/v1/x","status_code":200,
+        "capture":{"requestBody":serde_json::json!({
+            "messages":[
+                {"role":"system","content":"S"},
+                {"role":"user","content":"start"},
+                // A long echoed history of prior tool results.
+                {"role":"assistant","content":[{"type":"tool_use","id":"a","name":"f","input":{}}]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"r1"}]},
+                {"role":"assistant","content":[{"type":"tool_use","id":"b","name":"f","input":{}}]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"b","content":"r2"}]},
+                {"role":"assistant","content":"done so far"},
+                // The NEW turn: exactly one fresh tool result.
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"b","content":"r3"}]}
+            ]
+        }).to_string()}
+    })
+    .to_string();
+    let j = thread_json(&nd);
+    assert_eq!(
+        j["records"]["1"]["tool_results"].as_i64(),
+        Some(1),
+        "only the one tool_result after the last assistant is counted, not the 2 in history"
+    );
+}
+
+#[test]
+fn thread_filter_scopes_records() {
+    // Using --model filter should restrict which records contribute to trees.
+    let nd = format!(
+        "{}\n{}\n",
+        serde_json::json!({
+            "id":1,"model":"alpha/one","path":"/v1/messages","status_code":200,
+            "capture":{"requestBody":body_with_messages("S",&[("user","a")])}
+        })
+        .to_string(),
+        serde_json::json!({
+            "id":2,"model":"beta/two","path":"/v1/messages","status_code":200,
+            "capture":{"requestBody":body_with_messages("S",&[("user","a"),("assistant","b")])}
+        })
+        .to_string(),
+    );
+    let f = Fixture::from_ndjson(&nd);
+    let out = Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("thread")
+        .arg(&f.cbor_zstd)
+        .arg("--model")
+        .arg("alpha/one")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let j: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(
+        j["records_total"].as_i64(),
+        Some(1),
+        "filter kept only alpha/one"
+    );
+    // Only one record => a shallow tree (sys + user), no branch.
+    assert_eq!(j["branch_count"].as_i64(), Some(0));
+}
+
+#[test]
+fn thread_redact_bad_preset_errors() {
+    let nd = rec(1, &body_with_messages("S", &[("user", "x")]));
+    let f = Fixture::from_ndjson(&nd);
+    Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("thread")
+        .arg(&f.cbor_zstd)
+        .arg("--redact-preset")
+        .arg("nonexistent")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown redact preset"));
+}
+
+#[test]
+fn thread_survives_redaction_that_breaks_json_body() {
+    // If a redact regex corrupts a JSON escape sequence inside
+    // capture.requestBody, the tree builder must skip that body gracefully
+    // rather than failing the whole run with "invalid escape".
+    let nd = serde_json::json!({
+        "id":1,"model":"m","path":"/v1/x","status_code":200,
+        "capture":{"requestBody":"{\"messages\":[{\"role\":\"user\",\"content\":\"a\\\\npath/secret\"}]}\""}
+    })
+    .to_string();
+    let f = Fixture::from_ndjson(&nd);
+    // A redact pattern that, if applied to the raw JSON text, leaves a dangling
+    // escape. The command must still exit successfully (the record is skipped).
+    Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("thread")
+        .arg(&f.cbor_zstd)
+        .arg("--redact")
+        .arg("secret")
+        .assert()
+        .success();
 }

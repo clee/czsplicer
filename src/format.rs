@@ -53,7 +53,7 @@ pub fn cbor_to_json(v: &ciborium::Value) -> Json {
             let mut m = JsonMap::new();
             m.insert(
                 TAG_KEY.into(),
-                Json::Array(vec![Json::Number((*t as u64).into()), cbor_to_json(inner)]),
+                Json::Array(vec![Json::Number((*t).into()), cbor_to_json(inner)]),
             );
             Json::Object(m)
         }
@@ -102,7 +102,7 @@ pub fn json_to_cbor(v: &Json) -> ciborium::Value {
             if m.len() == 1 {
                 if let Some(Json::Array(arr)) = m.get(TAG_KEY) {
                     if arr.len() == 2 {
-                        if let Some(Json::Number(t)) = arr.get(0) {
+                        if let Some(Json::Number(t)) = arr.first() {
                             if let Some(tag) = t.as_u64() {
                                 return Tag(tag, Box::new(json_to_cbor(&arr[1])));
                             }
@@ -209,11 +209,11 @@ impl<R: BufRead> Iterator for RecordStream<R> {
         }
         // Peek to distinguish "no more records" from a truncated record.
         match self.reader.fill_buf() {
-            Ok(buf) if buf.is_empty() => {
-                self.done = true;
-                None
-            }
-            Ok(_) => {
+            Ok(buf) => {
+                if buf.is_empty() {
+                    self.done = true;
+                    return None;
+                }
                 Some(ciborium::from_reader(&mut self.reader).map_err(|e| anyhow!(format!("{e}"))))
             }
             Err(e) => {
@@ -310,6 +310,16 @@ pub fn rec_str(rec: &ciborium::Value, key: &str) -> Option<String> {
 }
 pub fn rec_int(rec: &ciborium::Value, key: &str) -> Option<i64> {
     field(rec, key).and_then(as_int)
+}
+
+/// First `max` chars of `s`, slicing on a character boundary (never panics on
+/// multibyte content, unlike `&s[..max]`). No ellipsis, no whitespace collapse
+/// — intended for fixed-width column display. O(max) work.
+pub fn clip_chars(s: &str, max: usize) -> &str {
+    match s.char_indices().nth(max) {
+        Some((i, _)) => &s[..i],
+        None => s,
+    }
 }
 
 /// Walks a dotted path (e.g. `capture.requestBody`) returning the value.

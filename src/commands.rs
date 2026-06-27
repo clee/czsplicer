@@ -1,20 +1,85 @@
-use crate::filter::FilterArgs;
+use crate::filter::{Filter, FilterArgs};
 use crate::format::{self, RecordStream};
+use crate::thread::{conversation_root, ThreadBuilder};
 use anyhow::{anyhow, Result};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // small helpers
 // ---------------------------------------------------------------------------
 
-fn output_writer(path: &Option<PathBuf>) -> Result<Box<dyn Write>> {
-    match path {
-        Some(p) => Ok(Box::new(BufWriter::new(File::create(p)?))),
-        None => Ok(Box::new(BufWriter::new(std::io::stdout()))),
+/// Parse a JSON stream (either a JSON array or one-record-per-line NDJSON)
+/// from `reader`, converting each object to CBOR via the JSON→CBOR bridge and
+/// invoking `emit` for it. Returns the number of records emitted. `is_array`
+/// selects the input shape (auto-detected by the caller).
+fn parse_json_records(
+    reader: BufReader<File>,
+    is_array: bool,
+    mut emit: impl FnMut(&ciborium::Value) -> Result<()>,
+) -> Result<u64> {
+    let mut count = 0u64;
+    if is_array {
+        let arr: serde_json::Value = serde_json::from_reader(reader)?;
+        if let serde_json::Value::Array(items) = arr {
+            for item in items {
+                let cbor = format::json_to_cbor(&item);
+                emit(&cbor)?;
+                count += 1;
+            }
+        }
+    } else {
+        for line in reader.lines() {
+            let line = line?;
+            let t = line.trim();
+            if t.is_empty() {
+                continue;
+            }
+            let jv: serde_json::Value = serde_json::from_str(t)?;
+            let cbor = format::json_to_cbor(&jv);
+            emit(&cbor)?;
+            count += 1;
+        }
     }
+    Ok(count)
+}
+
+fn output_writer(path: Option<&Path>) -> Result<Box<dyn Write>> {
+    match path {
+        Some(p) if p != Path::new("-") => Ok(Box::new(BufWriter::new(File::create(p)?))),
+        _ => Ok(Box::new(BufWriter::new(std::io::stdout()))),
+    }
+}
+
+/// Stream every record from `files` (in order), invoking `body` for each
+/// record that passes `filter`. Returns the number of records the filter
+/// skipped (the "dropped" count); decode/IO errors propagate from `body`.
+///
+/// This is the common read path for `ls`/`extract`/`grep`/`stats`/`edit`/
+/// `merge`/`split`/`thread`: stream the concatenated CBOR-over-zstd records,
+/// gate on the filter, then run a per-record transform. `verify` and `info`
+/// don't fit this shape (verify collects decode errors instead of
+/// propagating them; `info` summarizes whole files) and keep their own loops.
+fn for_each_matching_record(
+    files: &[PathBuf],
+    filter: &Filter,
+    mut body: impl FnMut(ciborium::Value) -> Result<()>,
+) -> Result<u64> {
+    let mut dropped = 0u64;
+    for f in files {
+        let stream = RecordStream::open(f)?;
+        for rec in stream {
+            let rec = rec?;
+            if filter.matches(&rec) {
+                body(rec)?;
+            } else {
+                dropped += 1;
+            }
+        }
+    }
+    Ok(dropped)
 }
 
 fn usage_int(rec: &ciborium::Value, key: &str) -> i64 {
@@ -79,7 +144,7 @@ pub fn cmd_info(args: &InfoArgs) -> Result<()> {
         let mut models: std::collections::BTreeSet<String> = Default::default();
 
         let mut stream = RecordStream::open_counting(f)?;
-        while let Some(rec) = stream.next() {
+        for rec in &mut stream {
             let rec = rec?;
             count += 1;
             let id = rec_id(&rec);
@@ -191,7 +256,7 @@ pub struct LsArgs {
 
 pub fn cmd_ls(args: &LsArgs) -> Result<()> {
     let filter = args.filter.build()?;
-    let mut out = output_writer(&None)?;
+    let mut out = output_writer(None)?;
     let mut shown = 0u64;
 
     if !args.json {
@@ -203,59 +268,42 @@ pub fn cmd_ls(args: &LsArgs) -> Result<()> {
         writeln!(out, "{}", "-".repeat(130))?;
     }
 
-    for f in &args.files {
-        let mut stream = RecordStream::open(f)?;
-        while let Some(rec) = stream.next() {
-            let rec = rec?;
-            if !filter.matches(&rec) {
-                continue;
-            }
-            shown += 1;
-            let id = rec_id(&rec);
-            let ts = format::rec_str(&rec, "timestamp").unwrap_or_default();
-            let model = format::rec_str(&rec, "model").unwrap_or_default();
-            let path = format::rec_str(&rec, "path").unwrap_or_default();
-            let status = format::rec_int(&rec, "status_code").unwrap_or(0);
-            let in_tok = usage_int(&rec, "input_tokens");
-            let out_tok = usage_int(&rec, "output_tokens");
-            let cost = rec_cost(&rec);
+    for_each_matching_record(&args.files, &filter, |rec| {
+        let id = rec_id(&rec);
+        let ts = format::rec_str(&rec, "timestamp").unwrap_or_default();
+        let model = format::rec_str(&rec, "model").unwrap_or_default();
+        let path = format::rec_str(&rec, "path").unwrap_or_default();
+        let status = format::rec_int(&rec, "status_code").unwrap_or(0);
+        let in_tok = usage_int(&rec, "input_tokens");
+        let out_tok = usage_int(&rec, "output_tokens");
+        let cost = rec_cost(&rec);
 
-            if args.json {
-                let row = serde_json::json!({
-                    "id": id,
-                    "timestamp": ts,
-                    "model": model,
-                    "path": path,
-                    "status_code": status,
-                    "input_tokens": in_tok,
-                    "output_tokens": out_tok,
-                    "cost_usd": cost,
-                });
-                writeln!(out, "{}", serde_json::to_string(&row)?)?;
-            } else {
-                let ts = if ts.len() > 26 {
-                    ts[..26].to_string()
-                } else {
-                    ts
-                };
-                let model = if model.len() > 28 {
-                    model[..28].to_string()
-                } else {
-                    model
-                };
-                let path = if path.len() > 26 {
-                    path[..26].to_string()
-                } else {
-                    path
-                };
-                writeln!(
-                    out,
-                    "{:>6}  {:<26} {:<28} {:<26} {:>6} {:>9} {:>9} {:>9.4}",
-                    id, ts, model, path, status, in_tok, out_tok, cost
-                )?;
-            }
+        if args.json {
+            let row = serde_json::json!({
+                "id": id,
+                "timestamp": ts,
+                "model": model,
+                "path": path,
+                "status_code": status,
+                "input_tokens": in_tok,
+                "output_tokens": out_tok,
+                "cost_usd": cost,
+            });
+            writeln!(out, "{}", serde_json::to_string(&row)?)?;
+        } else {
+            let ts = format::clip_chars(&ts, 26).to_string();
+            let model = format::clip_chars(&model, 28).to_string();
+            let path = format::clip_chars(&path, 26).to_string();
+            writeln!(
+                out,
+                "{:>6}  {:<26} {:<28} {:<26} {:>6} {:>9} {:>9} {:>9.4}",
+                id, ts, model, path, status, in_tok, out_tok, cost
+            )?;
         }
-    }
+        shown += 1;
+        Ok(())
+    })?;
+
     if !args.json {
         eprintln!("{shown} record(s)");
     }
@@ -294,23 +342,17 @@ pub fn cmd_extract(args: &ExtractArgs) -> Result<()> {
     if let Some(d) = &args.bodies {
         std::fs::create_dir_all(d)?;
     }
-    let mut out = output_writer(&args.output)?;
+    let mut out = output_writer(args.output.as_deref())?;
     let mut count = 0u64;
 
     if args.array {
         // Collect into a JSON array (buffers all matched records in memory).
         let mut arr: Vec<serde_json::Value> = Vec::new();
-        for f in &args.files {
-            let mut stream = RecordStream::open(f)?;
-            while let Some(rec) = stream.next() {
-                let rec = rec?;
-                if !filter.matches(&rec) {
-                    continue;
-                }
-                arr.push(extract_record(&rec, args)?);
-                count += 1;
-            }
-        }
+        for_each_matching_record(&args.files, &filter, |rec| {
+            arr.push(extract_record(&rec, args)?);
+            count += 1;
+            Ok(())
+        })?;
         if args.pretty {
             serde_json::to_writer_pretty(&mut out, &serde_json::Value::Array(arr))?;
         } else {
@@ -319,19 +361,13 @@ pub fn cmd_extract(args: &ExtractArgs) -> Result<()> {
         writeln!(out)?;
     } else {
         // NDJSON: one record per line, streaming.
-        for f in &args.files {
-            let mut stream = RecordStream::open(f)?;
-            while let Some(rec) = stream.next() {
-                let rec = rec?;
-                if !filter.matches(&rec) {
-                    continue;
-                }
-                let jv = extract_record(&rec, args)?;
-                serde_json::to_writer(&mut out, &jv)?;
-                writeln!(out)?;
-                count += 1;
-            }
-        }
+        for_each_matching_record(&args.files, &filter, |rec| {
+            let jv = extract_record(&rec, args)?;
+            serde_json::to_writer(&mut out, &jv)?;
+            writeln!(out)?;
+            count += 1;
+            Ok(())
+        })?;
     }
     eprintln!("{count} record(s) extracted");
     Ok(())
@@ -399,62 +435,19 @@ pub fn cmd_repack(args: &RepackArgs) -> Result<()> {
         .map(|b| *b == b'[')
         .unwrap_or(false);
 
-    let mut count = 0u64;
-
-    if args.raw {
+    let count = if args.raw {
         let mut file = BufWriter::new(File::create(&args.output)?);
-        let write_one = |v: &ciborium::Value, w: &mut dyn Write| -> Result<()> {
-            format::write_cbor_record(v, w)
-        };
-        if is_array {
-            let arr: serde_json::Value = serde_json::from_reader(reader)?;
-            if let serde_json::Value::Array(items) = arr {
-                for item in items {
-                    let cbor = format::json_to_cbor(&item);
-                    write_one(&cbor, &mut file)?;
-                    count += 1;
-                }
-            }
-        } else {
-            for line in reader.lines() {
-                let line = line?;
-                let t = line.trim();
-                if t.is_empty() {
-                    continue;
-                }
-                let jv: serde_json::Value = serde_json::from_str(t)?;
-                let cbor = format::json_to_cbor(&jv);
-                write_one(&cbor, &mut file)?;
-                count += 1;
-            }
-        }
+        let n = parse_json_records(reader, is_array, |cbor| {
+            format::write_cbor_record(cbor, &mut file)
+        })?;
         file.flush()?;
+        n
     } else {
         let mut packer = format::ZstdPacker::create(&args.output, args.level)?;
-        if is_array {
-            let arr: serde_json::Value = serde_json::from_reader(reader)?;
-            if let serde_json::Value::Array(items) = arr {
-                for item in items {
-                    let cbor = format::json_to_cbor(&item);
-                    packer.write_record(&cbor)?;
-                    count += 1;
-                }
-            }
-        } else {
-            for line in reader.lines() {
-                let line = line?;
-                let t = line.trim();
-                if t.is_empty() {
-                    continue;
-                }
-                let jv: serde_json::Value = serde_json::from_str(t)?;
-                let cbor = format::json_to_cbor(&jv);
-                packer.write_record(&cbor)?;
-                count += 1;
-            }
-        }
+        let n = parse_json_records(reader, is_array, |cbor| packer.write_record(cbor))?;
         packer.finish()?;
-    }
+        n
+    };
     eprintln!("{count} record(s) repacked -> {}", args.output.display());
     Ok(())
 }
@@ -503,15 +496,7 @@ pub fn cmd_edit(args: &EditArgs) -> Result<()> {
     let filter = args.filter.build()?;
 
     // Merge explicit redact patterns with expanded presets.
-    let mut all_patterns = args.redact.clone();
-    all_patterns.extend(expand_presets(&args.redact_presets)?);
-    all_patterns = all_patterns.into_iter().filter(|p| !p.is_empty()).collect();
-
-    let regexes: Vec<regex::Regex> = all_patterns
-        .iter()
-        .map(|p| regex::Regex::new(p))
-        .collect::<Result<_, _>>()
-        .map_err(|e| anyhow!("invalid redact regex: {e}"))?;
+    let regexes = compile_redact_regexes(&args.redact, &args.redact_presets)?;
 
     if args.json && args.output.to_string_lossy() != "-" {
         // writing JSON NDJSON; ensure parent dir exists
@@ -521,43 +506,26 @@ pub fn cmd_edit(args: &EditArgs) -> Result<()> {
     }
 
     let mut kept = 0u64;
-    let mut dropped = 0u64;
+    let dropped;
 
     if args.json {
-        let mut out = BufWriter::new(match args.output.to_string_lossy().as_ref() {
-            "-" => Box::new(std::io::stdout()) as Box<dyn Write>,
-            _ => Box::new(File::create(&args.output)?),
-        });
-        for f in &args.files {
-            let mut stream = RecordStream::open(f)?;
-            while let Some(rec) = stream.next() {
-                let mut rec = rec?;
-                if !filter.matches(&rec) {
-                    dropped += 1;
-                    continue;
-                }
-                transform(&mut rec, args, &regexes);
-                serde_json::to_writer(&mut out, &format::cbor_to_json(&rec))?;
-                writeln!(out)?;
-                kept += 1;
-            }
-        }
+        let mut out = output_writer(Some(args.output.as_path()))?;
+        dropped = for_each_matching_record(&args.files, &filter, |mut rec| {
+            transform(&mut rec, args, &regexes);
+            serde_json::to_writer(&mut out, &format::cbor_to_json(&rec))?;
+            writeln!(out)?;
+            kept += 1;
+            Ok(())
+        })?;
         out.flush()?;
     } else {
         let mut packer = format::ZstdPacker::create(&args.output, args.level)?;
-        for f in &args.files {
-            let mut stream = RecordStream::open(f)?;
-            while let Some(rec) = stream.next() {
-                let mut rec = rec?;
-                if !filter.matches(&rec) {
-                    dropped += 1;
-                    continue;
-                }
-                transform(&mut rec, args, &regexes);
-                packer.write_record(&rec)?;
-                kept += 1;
-            }
-        }
+        dropped = for_each_matching_record(&args.files, &filter, |mut rec| {
+            transform(&mut rec, args, &regexes);
+            packer.write_record(&rec)?;
+            kept += 1;
+            Ok(())
+        })?;
         packer.finish()?;
     }
     eprintln!(
@@ -651,46 +619,40 @@ pub fn cmd_stats(args: &StatsArgs) -> Result<()> {
     let mut min_ts: Option<String> = None;
     let mut max_ts: Option<String> = None;
 
-    for f in &args.files {
-        let mut stream = RecordStream::open(f)?;
-        while let Some(rec) = stream.next() {
-            let rec = rec?;
-            if !filter.matches(&rec) {
-                continue;
+    for_each_matching_record(&args.files, &filter, |rec| {
+        let model = format::rec_str(&rec, "model").unwrap_or_else(|| "-".into());
+        let provider = model
+            .split_once('/')
+            .map(|(p, _)| p.to_string())
+            .unwrap_or_else(|| "-".into());
+        let path = format::rec_str(&rec, "path").unwrap_or_else(|| "-".into());
+        let status = format::rec_int(&rec, "status_code")
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "-".into());
+        let b = Bucket {
+            count: 1,
+            input_tokens: usage_int(&rec, "input_tokens"),
+            output_tokens: usage_int(&rec, "output_tokens"),
+            cached_tokens: usage_int(&rec, "cached_tokens"),
+            reasoning_tokens: usage_int(&rec, "reasoning_tokens"),
+            cost: rec_cost(&rec),
+            duration_ms: format::rec_int(&rec, "duration_ms").unwrap_or(0),
+        };
+        accumulate(&mut total, &b);
+        accumulate(by_model.entry(model).or_default(), &b);
+        accumulate(by_provider.entry(provider).or_default(), &b);
+        accumulate(by_path.entry(path).or_default(), &b);
+        accumulate(by_status.entry(status).or_default(), &b);
+        if let Some(ts) = format::rec_str(&rec, "timestamp") {
+            if min_ts.as_ref().map_or(true, |m| m > &ts) {
+                min_ts = Some(ts.clone());
             }
-            let model = format::rec_str(&rec, "model").unwrap_or_else(|| "-".into());
-            let provider = model
-                .split_once('/')
-                .map(|(p, _)| p.to_string())
-                .unwrap_or_else(|| "-".into());
-            let path = format::rec_str(&rec, "path").unwrap_or_else(|| "-".into());
-            let status = format::rec_int(&rec, "status_code")
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "-".into());
-            let b = Bucket {
-                count: 1,
-                input_tokens: usage_int(&rec, "input_tokens"),
-                output_tokens: usage_int(&rec, "output_tokens"),
-                cached_tokens: usage_int(&rec, "cached_tokens"),
-                reasoning_tokens: usage_int(&rec, "reasoning_tokens"),
-                cost: rec_cost(&rec),
-                duration_ms: format::rec_int(&rec, "duration_ms").unwrap_or(0),
-            };
-            accumulate(&mut total, &b);
-            accumulate(by_model.entry(model).or_default(), &b);
-            accumulate(by_provider.entry(provider).or_default(), &b);
-            accumulate(by_path.entry(path).or_default(), &b);
-            accumulate(by_status.entry(status).or_default(), &b);
-            if let Some(ts) = format::rec_str(&rec, "timestamp") {
-                if min_ts.as_ref().map_or(true, |m| m > &ts) {
-                    min_ts = Some(ts.clone());
-                }
-                if max_ts.as_ref().map_or(true, |m| m < &ts) {
-                    max_ts = Some(ts);
-                }
+            if max_ts.as_ref().map_or(true, |m| m < &ts) {
+                max_ts = Some(ts);
             }
         }
-    }
+        Ok(())
+    })?;
 
     if args.json {
         let j = serde_json::json!({
@@ -757,7 +719,7 @@ pub fn cmd_stats(args: &StatsArgs) -> Result<()> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     for (k, b) in rows {
-        let k = if k.len() > 34 { &k[..34] } else { k };
+        let k = format::clip_chars(k, 34);
         println!(
             "{:<34} {:>7} {:>9} {:>9} {:>9} {:>9.4}",
             k, b.count, b.input_tokens, b.output_tokens, b.reasoning_tokens, b.cost
@@ -844,8 +806,22 @@ fn snippet_around(re: &regex::Regex, s: &str) -> Option<String> {
         snip.push_str("...");
     }
     // Trim to char boundaries so we don't panic on mid-codepoint slices.
-    let s_start = s.floor_char_boundary(start.min(s.len()));
-    let s_end = s.ceil_char_boundary(end);
+    // (Manual `is_char_boundary` walk instead of `floor`/`ceil_char_boundary`,
+    // which are stable only since 1.91 — this project targets 1.80.)
+    let s_start = {
+        let mut i = start.min(s.len());
+        while !s.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    };
+    let s_end = {
+        let mut i = end.min(s.len());
+        while i < s.len() && !s.is_char_boundary(i) {
+            i += 1;
+        }
+        i
+    };
     snip.push_str(&s[s_start..s_end]);
     if end < s.len() {
         snip.push_str("...");
@@ -863,66 +839,55 @@ pub fn cmd_grep(args: &GrepArgs) -> Result<()> {
         .build()
         .map_err(|e| anyhow!("invalid pattern `{}`: {e}", args.pattern))?;
 
-    let mut out = output_writer(&None)?;
+    let mut out = output_writer(None)?;
     let mut total = 0u64;
 
-    for f in &args.files {
-        let mut stream = RecordStream::open(f)?;
-        while let Some(rec) = stream.next() {
-            let rec = rec?;
-            if !filter.matches(&rec) {
-                continue;
-            }
-
-            // Find first matching snippet (or, in --count mode, first match).
-            let mut found: Option<String> = None;
-            let mut visitor = |s: &str| {
-                if found.is_none() {
-                    if args.count {
-                        if re.is_match(s) {
-                            found = Some(String::new());
-                        }
-                    } else {
-                        found = snippet_around(&re, s);
-                    }
-                }
-            };
-            if let Some(field_path) = &args.field {
-                if let Some(v) = format::path_get(&rec, field_path) {
-                    format::search_value_strings(v, &mut visitor);
-                }
-            } else {
-                format::search_value_strings(&rec, &mut visitor);
-            }
-
+    for_each_matching_record(&args.files, &filter, |rec| {
+        // Find first matching snippet (or, in --count mode, first match).
+        let mut found: Option<String> = None;
+        let mut visitor = |s: &str| {
             if found.is_none() {
-                continue;
-            }
-            total += 1;
-
-            if args.count {
-                continue;
-            }
-            if args.json {
-                serde_json::to_writer(&mut out, &format::cbor_to_json(&rec))?;
-                writeln!(out)?;
-            } else {
-                let id = rec_id(&rec);
-                let model = format::rec_str(&rec, "model").unwrap_or_default();
-                let model = if model.len() > 24 {
-                    model[..24].to_string()
+                if args.count {
+                    if re.is_match(s) {
+                        found = Some(String::new());
+                    }
                 } else {
-                    model
-                };
-                let snip = found.unwrap();
-                if args.show_matches {
-                    writeln!(out, "{id}: {snip}")?;
-                } else {
-                    writeln!(out, "{:>5}  {:<24}  {}", id, model, snip)?;
+                    found = snippet_around(&re, s);
                 }
+            }
+        };
+        if let Some(field_path) = &args.field {
+            if let Some(v) = format::path_get(&rec, field_path) {
+                format::search_value_strings(v, &mut visitor);
+            }
+        } else {
+            format::search_value_strings(&rec, &mut visitor);
+        }
+
+        if found.is_none() {
+            return Ok(());
+        }
+        total += 1;
+
+        if args.count {
+            return Ok(());
+        }
+        if args.json {
+            serde_json::to_writer(&mut out, &format::cbor_to_json(&rec))?;
+            writeln!(out)?;
+        } else {
+            let id = rec_id(&rec);
+            let model = format::rec_str(&rec, "model").unwrap_or_default();
+            let model = format::clip_chars(&model, 24).to_string();
+            let snip = found.unwrap();
+            if args.show_matches {
+                writeln!(out, "{id}: {snip}")?;
+            } else {
+                writeln!(out, "{:>5}  {:<24}  {}", id, model, snip)?;
             }
         }
-    }
+        Ok(())
+    })?;
 
     if args.count {
         writeln!(out, "{total}")?;
@@ -960,7 +925,7 @@ pub fn cmd_verify(args: &VerifyArgs) -> Result<()> {
         let mut count = 0u64;
         let mut error: Option<String> = None;
 
-        while let Some(res) = stream.next() {
+        for res in &mut stream {
             match res {
                 Ok(_) => count += 1,
                 Err(e) => {
@@ -1052,6 +1017,11 @@ pub const REDACT_PRESETS: &[(&str, &str, &str)] = &[
     ),
     ("bearer", r"(?i:bearer\s+[A-Za-z0-9._-]+)", "Bearer tokens"),
     ("aws", r"AKIA[0-9A-Z]{16}", "AWS access key IDs"),
+    (
+        "secretkey",
+        r#"(?i)secret(?:\s+access)?\s+key\b[*`:='"\s]*[A-Za-z0-9/+=]{20,}"#,
+        "Labeled secret access keys (any 'Secret key:' / 'Secret access key:' block)",
+    ),
     ("ipv4", r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "IPv4 addresses"),
     (
         "uuid",
@@ -1094,6 +1064,20 @@ pub fn expand_presets(names: &[String]) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// Merge explicit `--redact` patterns with expanded `--redact-preset` names,
+/// drop empties (an empty regex would match everywhere and redact the whole
+/// body), and compile each into a `regex::Regex`. Shared by `edit` and `thread`.
+fn compile_redact_regexes(redact: &[String], presets: &[String]) -> Result<Vec<regex::Regex>> {
+    let mut all_patterns = redact.to_vec();
+    all_patterns.extend(expand_presets(presets)?);
+    all_patterns.retain(|p| !p.is_empty());
+    all_patterns
+        .iter()
+        .map(|p| regex::Regex::new(p))
+        .collect::<Result<_, _>>()
+        .map_err(|e| anyhow!("invalid redact regex: {e}"))
+}
+
 // ---------------------------------------------------------------------------
 // merge
 // ---------------------------------------------------------------------------
@@ -1118,19 +1102,11 @@ pub fn cmd_merge(args: &MergeArgs) -> Result<()> {
     let filter = args.filter.build()?;
     let mut packer = format::ZstdPacker::create(&args.output, args.level)?;
     let mut kept = 0u64;
-    let mut dropped = 0u64;
-    for f in &args.files {
-        let mut stream = RecordStream::open(f)?;
-        while let Some(rec) = stream.next() {
-            let rec = rec?;
-            if !filter.matches(&rec) {
-                dropped += 1;
-                continue;
-            }
-            packer.write_record(&rec)?;
-            kept += 1;
-        }
-    }
+    let dropped = for_each_matching_record(&args.files, &filter, |rec| {
+        packer.write_record(&rec)?;
+        kept += 1;
+        Ok(())
+    })?;
     packer.finish()?;
     eprintln!(
         "{kept} record(s) merged, {dropped} dropped -> {}",
@@ -1191,22 +1167,32 @@ fn parse_group_by(s: &str) -> Result<GroupBy> {
 
 /// The grouping key for a record. `None` means the record can't be grouped
 /// (missing the relevant field) and is skipped.
-fn group_key(by: GroupBy, rec: &ciborium::Value) -> Option<String> {
-    match by {
+fn group_key(by: GroupBy, rec: &ciborium::Value) -> Result<Option<String>> {
+    Ok(match by {
         GroupBy::Day => format::rec_str(rec, "timestamp").map(|t| {
             // calendar day = first 10 chars `YYYY-MM-DD`
             t.get(..10).unwrap_or(&t).to_string()
         }),
-        GroupBy::Session => format::rec_str(rec, "session_id").or_else(|| {
-            format::field(rec, "capture")
-                .and_then(|c| format::field(c, "sessionId"))
-                .and_then(format::as_str)
-        }),
+        GroupBy::Session => {
+            // Aperture gives every request a unique session_id, so the raw
+            // field is useless for grouping. Group by conversation root
+            // instead (first message hash) — same conversation, branches
+            // included. Falls back to raw session_id only if the record has
+            // no parseable message path.
+            match conversation_root(rec)? {
+                Some(root) => Some(root.file_key()),
+                None => format::rec_str(rec, "session_id").or_else(|| {
+                    format::field(rec, "capture")
+                        .and_then(|c| format::field(c, "sessionId"))
+                        .and_then(format::as_str)
+                }),
+            }
+        }
         GroupBy::Model => format::rec_str(rec, "model"),
         GroupBy::Provider => format::rec_str(rec, "model")
             .map(|m| m.split_once('/').map(|(p, _)| p.to_string()).unwrap_or(m)),
         GroupBy::Path => format::rec_str(rec, "path"),
-    }
+    })
 }
 
 /// Make a group key safe to use as a filename (models/paths contain `/`).
@@ -1227,6 +1213,7 @@ const MAX_OPEN_GROUPS: usize = 512;
 /// Split one logical stream into per-group `.cbor.zstd` files. Two-pass:
 ///   1. count records per group (cheap, streaming);
 ///   2. write only groups whose count >= min_records, one writer each.
+///
 /// This keeps memory flat and bounds open file handles, while correctly
 /// handling interleaved groups (sessions are not time-contiguous).
 pub fn cmd_split(args: &SplitArgs) -> Result<()> {
@@ -1238,19 +1225,13 @@ pub fn cmd_split(args: &SplitArgs) -> Result<()> {
     // --- pass 1: counts ---
     let mut counts: BTreeMap<String, u64> = BTreeMap::new();
     let mut scanned = 0u64;
-    for f in &args.files {
-        let mut stream = RecordStream::open(f)?;
-        while let Some(rec) = stream.next() {
-            let rec = rec?;
-            if !filter.matches(&rec) {
-                continue;
-            }
-            scanned += 1;
-            if let Some(k) = group_key(by, &rec) {
-                *counts.entry(k).or_default() += 1;
-            }
+    for_each_matching_record(&args.files, &filter, |rec| {
+        scanned += 1;
+        if let Some(k) = group_key(by, &rec)? {
+            *counts.entry(k).or_default() += 1;
         }
-    }
+        Ok(())
+    })?;
 
     let qualifying: BTreeMap<String, u64> = counts
         .iter()
@@ -1303,20 +1284,14 @@ pub fn cmd_split(args: &SplitArgs) -> Result<()> {
         let path = args.out_dir.join(format!("{}.cbor.zstd", sanitize_key(k)));
         writers.insert(k.clone(), format::ZstdPacker::create(&path, args.level)?);
     }
-    for f in &args.files {
-        let mut stream = RecordStream::open(f)?;
-        while let Some(rec) = stream.next() {
-            let rec = rec?;
-            if !filter.matches(&rec) {
-                continue;
-            }
-            if let Some(k) = group_key(by, &rec) {
-                if let Some(w) = writers.get_mut(&k) {
-                    w.write_record(&rec)?;
-                }
+    for_each_matching_record(&args.files, &filter, |rec| {
+        if let Some(k) = group_key(by, &rec)? {
+            if let Some(w) = writers.get_mut(&k) {
+                w.write_record(&rec)?;
             }
         }
-    }
+        Ok(())
+    })?;
     for (_, w) in writers {
         w.finish()?;
     }
@@ -1328,5 +1303,101 @@ pub fn cmd_split(args: &SplitArgs) -> Result<()> {
         args.out_dir.display(),
         counts.len() - qualifying.len(),
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// thread
+// ---------------------------------------------------------------------------
+
+/// Reconstructs conversation threads from request message histories.
+///
+/// Each record's `capture.requestBody.messages` echoes its full parent path, so
+/// a trie over message-content hashes recovers the branching structure.
+#[derive(clap::Args)]
+pub struct ThreadArgs {
+    #[arg(required = true)]
+    pub files: Vec<PathBuf>,
+    /// Write JSON to this path instead of stdout (`-` for stdout).
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+    /// Redact secrets matching this regex (repeatable). Applied to message
+    /// bodies and tool text before rendering.
+    #[arg(long, value_name = "REGEX")]
+    pub redact: Vec<String>,
+    /// Redact preset(s): email, jwt, apikey, bearer, aws, ipv4, uuid, creditcard,
+    /// ssn, or `all` (repeatable).
+    #[arg(long = "redact-preset", value_name = "NAME")]
+    pub redact_presets: Vec<String>,
+    /// Replacement text for redacted spans (default `[REDACTED]`).
+    #[arg(long, value_name = "TOKEN", default_value = "[REDACTED]")]
+    pub redact_replacement: String,
+    #[command(flatten)]
+    pub filter: FilterArgs,
+}
+
+pub fn cmd_thread(args: &ThreadArgs) -> Result<()> {
+    let filter = args.filter.build()?;
+    // Build the redaction regex set (mirrors `edit`).
+    let redexes = compile_redact_regexes(&args.redact, &args.redact_presets)?;
+    let redact_repl = args.redact_replacement.clone();
+    let do_redact = !redexes.is_empty();
+    let redact = |s: &str| -> String {
+        let mut cur = s.to_string();
+        for r in &redexes {
+            cur = r.replace_all(&cur, redact_repl.as_str()).to_string();
+        }
+        cur
+    };
+
+    let mut builder = ThreadBuilder::new();
+    let mut total = 0u64;
+    let mut with_messages = 0u64;
+    for_each_matching_record(&args.files, &filter, |mut rec| {
+        if do_redact {
+            // Scrub text and valid-UTF-8 byte bodies (e.g. raw HTTP) before
+            // the thread builder extracts message content / metadata.
+            format::redact_strings(&mut rec, &redact);
+        }
+        total += 1;
+        if builder.add_record(&rec)? {
+            with_messages += 1;
+        }
+        Ok(())
+    })?;
+    let j = builder.to_json(total, with_messages);
+
+    let pretty = serde_json::to_string_pretty(&j)?;
+    let bytes = pretty.into_bytes();
+    write_output(args.output.as_ref(), &bytes, "json")?;
+    eprintln!("{}", thread_summary(total, with_messages, &j));
+    Ok(())
+}
+
+/// Common summary line for `cmd_thread`: records scanned, how many carried
+/// messages, and the reconstructed thread / branch-point counts. Used by the
+/// built-in HTML, themed, and JSON output paths (each appends its own suffix).
+fn thread_summary(total: u64, with_messages: u64, j: &serde_json::Value) -> String {
+    format!(
+        "{} record(s) ({} with messages) -> {} thread(s), {} branch point(s)",
+        total, with_messages, j["root_count"], j["branch_count"],
+    )
+}
+
+/// Write `bytes` to the configured output (file path, `-`/None = stdout).
+fn write_output(output: Option<&PathBuf>, bytes: &[u8], kind: &str) -> Result<()> {
+    match output {
+        Some(p) if p != Path::new("-") => {
+            std::fs::write(p, bytes)?;
+            eprintln!("wrote {} bytes of {kind} -> {}", bytes.len(), p.display());
+        }
+        _ => {
+            use std::io::Write;
+            std::io::stdout().write_all(bytes)?;
+            if kind == "json" {
+                println!();
+            }
+        }
+    }
     Ok(())
 }

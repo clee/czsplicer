@@ -1,6 +1,8 @@
 mod commands;
 mod filter;
 mod format;
+mod render;
+mod thread;
 
 use anyhow::Result;
 use clap::Parser;
@@ -40,6 +42,8 @@ enum Cmd {
     Merge(MergeArgs),
     /// Split one stream into per-group `.cbor.zstd` files (by day/session/model/path).
     Split(SplitArgs),
+    /// Reconstruct conversation threads from request message histories (branches included).
+    Thread(ThreadArgs),
     /// Aggregate stats: tokens, cost, durations, by-model / by-path.
     Stats(StatsArgs),
 }
@@ -83,6 +87,10 @@ fn main() -> Result<()> {
         Cmd::Stats(mut a) => {
             a.files = expand(a.files)?;
             cmd_stats(&a)
+        }
+        Cmd::Thread(mut a) => {
+            a.files = expand(a.files)?;
+            cmd_thread(&a)
         }
     }
 }
