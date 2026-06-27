@@ -2,6 +2,7 @@ mod builtin;
 mod commands;
 mod filter;
 mod format;
+mod mailbox;
 mod markdown;
 mod render;
 mod theme;

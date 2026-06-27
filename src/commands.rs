@@ -1,6 +1,7 @@
 use crate::builtin;
 use crate::filter::{Filter, FilterArgs};
 use crate::format::{self, RecordStream};
+use crate::mailbox;
 use crate::theme;
 use crate::thread::{conversation_root, ThreadBuilder};
 use anyhow::{anyhow, Result};
@@ -1323,6 +1324,12 @@ pub struct ThreadArgs {
     /// Write JSON/HTML/MBOX/Maildir to this path instead of stdout (`-` for stdout).
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+    /// Output format: json (default), html (built-in renderer), mbox, maildir.
+    #[arg(long, value_name = "FMT", default_value = "json")]
+    pub format: String,
+    /// Body rendering for mbox/maildir: plain, html (multipart/alternative), html-only.
+    #[arg(long, value_name = "MODE", default_value = "html")]
+    pub body: String,
     /// Emit self-contained HTML using the built-in long-form renderer.
     #[arg(long)]
     pub html: bool,
@@ -1402,6 +1409,43 @@ pub fn cmd_thread(args: &ThreadArgs) -> Result<()> {
             "{}; themed -> {}",
             thread_summary(total, with_messages, &j),
             theme_path.display()
+        );
+        return Ok(());
+    }
+
+    // MBOX / Maildir export: each trie node becomes one email, threaded by
+    // Message-ID / In-Reply-To. Selected by --format mbox|maildir.
+    if args.format == "mbox" || args.format == "maildir" {
+        let mode = mailbox::BodyMode::parse(&args.body)?;
+        if args.format == "mbox" {
+            // mbox may write to stdout (`-` or no -o) or a file.
+            let n = match args.output.as_ref() {
+                Some(p) if p.as_path() != Path::new("-") => mailbox::write_mbox(&j, mode, p)?,
+                _ => {
+                    let mut out = std::io::stdout();
+                    mailbox::write_mbox_to(&mut out, &j, mode)?
+                }
+            };
+            eprintln!(
+                "{} record(s) ({} with messages) -> {} message(s) [{} body] (mbox)",
+                total, with_messages, n, args.body,
+            );
+            return Ok(());
+        }
+        // maildir requires a real directory path.
+        let out = args
+            .output
+            .as_ref()
+            .filter(|p| p.as_path() != Path::new("-"))
+            .ok_or_else(|| anyhow!("--format maildir requires -o DIR"))?;
+        let n = mailbox::write_maildir(&j, mode, out)?;
+        eprintln!(
+            "{} record(s) ({} with messages) -> {} message(s) [{} body] -> {} (maildir)",
+            total,
+            with_messages,
+            n,
+            args.body,
+            out.display()
         );
         return Ok(());
     }

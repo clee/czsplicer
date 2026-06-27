@@ -3076,3 +3076,427 @@ fn thread_redact_secretkey_preset_scrubs_labeled_credentials() {
     );
     assert!(html.contains("[REDACTED]"));
 }
+// ===========================================================================
+// tree --format mbox / maildir (email export with threading)
+// ===========================================================================
+//
+// Each trie node becomes one email; threading is via Message-ID/In-Reply-To.
+// We parse the emitted mbox with a minimal hand-rolled splitter (no external
+// dep) and assert structural invariants: one message per node, every
+// In-Reply-To resolves to a real Message-ID, and the chosen body mode
+// produces the right Content-Type.
+
+/// Build a fixture and run `czsplicer tree --format mbox`, returning mbox bytes.
+fn thread_mbox(ndjson: &str, body: &str) -> Vec<u8> {
+    let f = Fixture::from_ndjson(ndjson);
+    let out = Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("thread")
+        .arg(&f.cbor_zstd)
+        .arg("--format")
+        .arg("mbox")
+        .arg("--body")
+        .arg(body)
+        .arg("-o")
+        .arg("-")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    out
+}
+
+/// Split mbox bytes into messages. A message starts at a line beginning with
+/// "From " (the envelope line); the body runs until the next "From " at start
+/// of a line or EOF.
+fn split_mbox(bytes: &[u8]) -> Vec<String> {
+    let s = String::from_utf8_lossy(bytes);
+    let mut msgs = Vec::new();
+    let mut cur = String::new();
+    let mut started = false;
+    for line in s.lines() {
+        if line.starts_with("From ") && started {
+            msgs.push(std::mem::take(&mut cur));
+        }
+        cur.push_str(line);
+        cur.push('\n');
+        started = true;
+    }
+    if !cur.is_empty() {
+        msgs.push(cur);
+    }
+    msgs
+}
+
+/// Extract the value of a header from a message (case-insensitive name).
+fn header<'a>(msg: &'a str, name: &str) -> Option<String> {
+    let name_l = name.to_lowercase();
+    for line in msg.lines() {
+        if line.is_empty() {
+            break; // end of headers
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().to_lowercase() == name_l {
+                return Some(v.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn mbox_emits_one_message_per_node() {
+    // 3 records forming one tree with 3 nodes (sys -> user -> asst+user).
+    // Actually: rec1=[s,u1], rec2=[s,u1,a1,u2] => trie has 4 nodes.
+    let nd = format!(
+        "{}\n{}\n",
+        rec(1, &body_with_messages("S", &[("user", "q")])),
+        rec(
+            2,
+            &body_with_messages("S", &[("user", "q"), ("assistant", "a"), ("user", "q2")])
+        ),
+    );
+    let out = thread_mbox(&nd, "plain");
+    let msgs = split_mbox(&out);
+    assert_eq!(msgs.len(), 4, "one email per trie node (sys,u,a,u2)");
+}
+
+#[test]
+fn mbox_threading_is_valid() {
+    // A branch: two records share [s,u1] then diverge with different assistant
+    // replies. The two assistant nodes both reply to the shared user node.
+    let nd = format!(
+        "{}\n{}\n",
+        rec(
+            1,
+            &body_with_messages("S", &[("user", "q"), ("assistant", "alpha")])
+        ),
+        rec(
+            2,
+            &body_with_messages("S", &[("user", "q"), ("assistant", "beta")])
+        ),
+    );
+    let out = thread_mbox(&nd, "plain");
+    let msgs = split_mbox(&out);
+    let mids: Vec<String> = msgs
+        .iter()
+        .filter_map(|m| header(m, "Message-ID"))
+        .collect();
+    assert!(!mids.is_empty());
+    // Every In-Reply-To must resolve to a Message-ID in the set.
+    for m in &msgs {
+        if let Some(parent) = header(m, "In-Reply-To") {
+            assert!(
+                mids.contains(&parent),
+                "dangling In-Reply-To {parent}; known mids = {mids:?}"
+            );
+        }
+    }
+    // Exactly one node has no In-Reply-To (the root).
+    let roots = msgs
+        .iter()
+        .filter(|m| header(m, "In-Reply-To").is_none())
+        .count();
+    assert_eq!(roots, 1, "exactly one root (the system prompt)");
+    // Exactly one node has two children (the branch at the user message): it
+    // appears as two In-Reply-To references pointing at the same Message-ID.
+    let mut parent_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for m in &msgs {
+        if let Some(p) = header(m, "In-Reply-To") {
+            *parent_counts.entry(p).or_default() += 1;
+        }
+    }
+    let branch_parents = parent_counts.values().filter(|&&c| c == 2).count();
+    assert_eq!(branch_parents, 1, "one branch point with 2 children");
+}
+
+#[test]
+fn mbox_body_plain_is_text_plain() {
+    let nd = rec(1, &body_with_messages("S", &[("user", "**bold**")]));
+    let out = thread_mbox(&nd, "plain");
+    let msgs = split_mbox(&out);
+    // Two nodes (system + user). Both should be text/plain and NOT contain
+    // rendered HTML.
+    for m in &msgs {
+        let ct = header(m, "Content-Type").unwrap_or_default();
+        assert!(
+            ct.starts_with("text/plain"),
+            "plain mode -> text/plain, got {ct}"
+        );
+    }
+    let user_msg = msgs
+        .iter()
+        .find(|m| header(m, "X-Czsplicer-Role") == Some("user".into()))
+        .unwrap();
+    assert!(
+        user_msg.contains("**bold**"),
+        "plain body keeps raw markdown"
+    );
+    assert!(!user_msg.contains("<strong>"), "plain body is not rendered");
+}
+
+#[test]
+fn mbox_body_html_is_multipart() {
+    let nd = rec(1, &body_with_messages("S", &[("user", "**bold**")]));
+    let out = thread_mbox(&nd, "html");
+    let msgs = split_mbox(&out);
+    for m in &msgs {
+        let ct = header(m, "Content-Type").unwrap_or_default();
+        assert!(
+            ct.starts_with("multipart/alternative"),
+            "html mode -> multipart, got {ct}"
+        );
+        assert!(m.contains("text/plain"), "multipart has plain part");
+        assert!(m.contains("text/html"), "multipart has html part");
+    }
+}
+
+#[test]
+fn mbox_body_html_only_is_text_html() {
+    let nd = rec(1, &body_with_messages("S", &[("user", "**bold**")]));
+    let out = thread_mbox(&nd, "html-only");
+    let msgs = split_mbox(&out);
+    for m in &msgs {
+        let ct = header(m, "Content-Type").unwrap_or_default();
+        assert!(
+            ct.starts_with("text/html"),
+            "html-only mode -> text/html, got {ct}"
+        );
+    }
+    let user_msg = msgs
+        .iter()
+        .find(|m| header(m, "X-Czsplicer-Role") == Some("user".into()))
+        .unwrap();
+    assert!(
+        user_msg.contains("<strong>bold</strong>"),
+        "html-only renders markdown"
+    );
+}
+
+#[test]
+fn mbox_subject_is_single_line() {
+    // A message whose content contains newlines must produce a single-line
+    // Subject (RFC 2822 forbids raw newlines in header values).
+    let nd = rec(
+        1,
+        &body_with_messages("S", &[("user", "line one\nline two\nline three")]),
+    );
+    let out = thread_mbox(&nd, "plain");
+    let msgs = split_mbox(&out);
+    for m in &msgs {
+        let subj = header(m, "Subject").unwrap_or_default();
+        assert!(!subj.contains('\n'), "Subject must not contain newlines");
+        assert!(!subj.contains('\r'), "Subject must not contain CR");
+    }
+}
+
+#[test]
+fn mbox_carries_record_metadata_headers() {
+    let nd = serde_json::json!({
+        "id":1,"model":"alpha/one","path":"/v1/x","status_code":429,
+        "timestamp":"2026-06-26T00:00:00Z","duration_ms":1234,"api_type":"oai_completions",
+        "capture":{"requestBody":body_with_messages("S",&[("user","q")])}
+    })
+    .to_string();
+    let out = thread_mbox(&nd, "plain");
+    let msgs = split_mbox(&out);
+    let user_msg = msgs
+        .iter()
+        .find(|m| header(m, "X-Czsplicer-Role") == Some("user".into()))
+        .unwrap();
+    assert_eq!(header(user_msg, "X-Czsplicer-Status"), Some("429".into()));
+    assert_eq!(
+        header(user_msg, "X-Czsplicer-Model"),
+        Some("alpha/one".into())
+    );
+    assert_eq!(header(user_msg, "X-Czsplicer-Depth"), Some("1".into()));
+}
+
+#[test]
+fn mbox_from_postmark_uses_ctime_not_rfc2822() {
+    // mutt's strict is_from() parser only accepts a ctime/asctime timestamp
+    // on the mbox From_ postmark line (e.g. "Mon Mar  9 22:25:37 2026").
+    // An RFC 2822 timestamp ("Mon, 09 Mar 2026 22:25:37 +0000") is rejected as
+    // a postmark, so mutt recognizes zero messages ("[Msgs:0 <size>]") on an
+    // otherwise-valid mbox. The Date: *header* must stay RFC 2822.
+    let nd = rec(1, &body_with_messages("S", &[("user", "q")]));
+    let out = thread_mbox(&nd, "plain");
+    let s = String::from_utf8(out).unwrap();
+    // First line is the postmark.
+    let postmark = s.lines().next().unwrap();
+    assert!(
+        postmark.starts_with("From czsplicer@localhost "),
+        "postmark line: {postmark:?}"
+    );
+    // The postmark timestamp must NOT contain a comma (RFC 2822 giveaway) nor
+    // a "+0000" zone offset; it must be ctime "Www Mmm DD HH:MM:SS YYYY".
+    let ts = &postmark["From czsplicer@localhost ".len()..];
+    assert!(
+        !ts.contains(','),
+        "postmark must be ctime (no comma), got: {ts:?}"
+    );
+    assert!(
+        !ts.contains("+0000"),
+        "postmark must be ctime (no +0000), got: {ts:?}"
+    );
+    // Sanity: ctime regex. Day-of-month is space-padded for single digits.
+    let ctime_re =
+        regex::Regex::new(r"^[A-Z][a-z]{2} [A-Z][a-z]{2} ( |\d)\d \d{2}:\d{2}:\d{2} \d{4}$")
+            .unwrap();
+    assert!(
+        ctime_re.is_match(ts),
+        "postmark timestamp {ts:?} is not ctime format"
+    );
+    // The Date: header stays RFC 2822 (comma + zone offset).
+    let first_msg = split_mbox(s.as_bytes()).into_iter().next().unwrap();
+    let date = header(&first_msg, "Date").expect("Date header present");
+    assert!(
+        date.contains(',') && date.contains("+0000"),
+        "Date: header must stay RFC 2822, got: {date:?}"
+    );
+}
+
+#[test]
+fn mbox_collapses_consecutive_same_role_nodes() {
+    // Two records whose message paths both contain a run of two consecutive
+    // system messages: [system, system, user]. The trie has 3 nodes per path
+    // (sys, sys, user) — the two system nodes are a same-role single-child
+    // chain and must collapse into ONE email, so the mbox has 2 emails
+    // (collapsed-system, user) rather than 3.
+    let nd = format!(
+        "{}\n{}\n",
+        rec(
+            1,
+            &body_with_messages("S1", &[("system", "S2"), ("user", "q")])
+        ),
+        rec(
+            2,
+            &body_with_messages("S1", &[("system", "S2"), ("user", "q"), ("assistant", "a")])
+        ),
+    );
+    // Sanity: the tree itself has 4 nodes (sys, sys, user, asst) — no collapse
+    // happens in the tree, only in the mbox emitter.
+    let j = thread_json(&nd);
+    let flat = flatten(&j["trees"]);
+    let node_count = flat.len();
+    assert_eq!(node_count, 4, "trie has 4 nodes: sys, sys, user, asst");
+
+    let out = thread_mbox(&nd, "plain");
+    let msgs = split_mbox(&out);
+    assert_eq!(
+        msgs.len(),
+        3,
+        "two consecutive system nodes collapse to one email: sys, user, asst"
+    );
+    // The collapsed email covers depths 0-1 and carries both system contents.
+    let sys_email = &msgs[0];
+    assert_eq!(header(sys_email, "X-Czsplicer-Role"), Some("system".into()));
+    assert_eq!(
+        header(sys_email, "X-Czsplicer-Depth"),
+        Some("0-1".into()),
+        "collapsed run reports a depth range"
+    );
+    let body = sys_email.splitn(2, "\n\n").nth(1).unwrap_or("");
+    assert!(body.contains("S1"), "first system content present");
+    assert!(body.contains("S2"), "second system content present");
+}
+
+#[test]
+fn mbox_tool_attachments_pair_call_with_result_across_records() {
+    // Realistic Aperture shape: record 1's request already includes the
+    // assistant message at depth 2 (a prior turn), and record 1's *response*
+    // issues a NEW tool_call. Record 2's request echoes the matching
+    // tool_result. The depth-2 assistant node's intro_rid is therefore 1
+    // (the first record to include the assistant message), which holds the
+    // call; record_ids[1] (record 2) holds the result. The mbox must emit ONE
+    // attachment whose payload contains BOTH the call input and the result,
+    // joined by "---".
+    let nd = format!(
+        "{}\n{}\n",
+        serde_json::json!({
+            "id":1,"model":"alpha/one","path":"/v1/x","status_code":200,
+            "timestamp":"2026-06-26T00:00:00Z",
+            "capture":{
+                "requestBody":serde_json::json!({
+                    "messages":[
+                        {"role":"system","content":"S"},
+                        {"role":"user","content":"do thing"},
+                        {"role":"assistant","content":[{"type":"tool_use","id":"t0","name":"prev","input":{}}]}
+                    ]
+                }).to_string(),
+                "responseBody":serde_json::json!({
+                    "choices":[{"message":{"role":"assistant","content":"ok","tool_calls":[
+                        {"id":"call_1","type":"function","function":{"name":"f","arguments":"{}"}}
+                    ]}}]
+                }).to_string()
+            }
+        }).to_string(),
+        serde_json::json!({
+            "id":2,"model":"alpha/one","path":"/v1/x","status_code":200,
+            "timestamp":"2026-06-26T00:00:01Z",
+            "capture":{
+                "requestBody":serde_json::json!({
+                    "messages":[
+                        {"role":"system","content":"S"},
+                        {"role":"user","content":"do thing"},
+                        {"role":"assistant","content":[{"type":"tool_use","id":"t0","name":"prev","input":{}}]},
+                        {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"done"}]}
+                    ]
+                }).to_string(),
+                "responseBody":"{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"all done\"}}]}"
+            }
+        }).to_string(),
+    );
+    let out = thread_mbox(&nd, "plain");
+    let msgs = split_mbox(&out);
+    // Find the assistant email (the one with a tool attachment).
+    let asst_email = msgs
+        .iter()
+        .find(|m| m.contains("Content-Disposition: attachment"))
+        .expect("assistant email has a tool-call attachment");
+    // The attachment payload pairs the call with its result, separated by "---".
+    assert!(
+        asst_email.contains("---\ndone")
+            || asst_email.contains("---\r\ndone")
+            || asst_email.contains("---done"),
+        "attachment pairs the call with the echoed tool_result 'done'"
+    );
+    assert!(
+        asst_email.contains("filename=\"tool-"),
+        "attachment has a tool-N-name.txt filename"
+    );
+}
+
+#[test]
+fn maildir_creates_three_subdirs_with_messages() {
+    use std::fs;
+    let nd = format!(
+        "{}\n{}\n",
+        rec(1, &body_with_messages("S", &[("user", "q")])),
+        rec(
+            2,
+            &body_with_messages("S", &[("user", "q"), ("assistant", "a")])
+        ),
+    );
+    let f = Fixture::from_ndjson(&nd);
+    let dir = f.dir.join("maildir_out");
+    Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("thread")
+        .arg(&f.cbor_zstd)
+        .arg("--format")
+        .arg("maildir")
+        .arg("--body")
+        .arg("plain")
+        .arg("-o")
+        .arg(&dir)
+        .assert()
+        .success();
+    assert!(dir.join("cur").is_dir(), "cur/ exists");
+    assert!(dir.join("new").is_dir(), "new/ exists");
+    assert!(dir.join("tmp").is_dir(), "tmp/ exists");
+    let new_count = fs::read_dir(dir.join("new")).unwrap().count();
+    assert_eq!(new_count, 3, "one file per node in new/ (sys, user, asst)");
+}

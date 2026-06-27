@@ -40,7 +40,7 @@ Commands:
   merge    Merge many `.cbor.zstd` files into one (CBOR -> CBOR, streaming)
   split    Split one stream into per-group `.cbor.zstd` files (by day/session/model/path)
   stats    Aggregate stats: tokens, cost, durations, by-model / by-path
-  thread   Reconstruct conversation threads (branching included); export as JSON/HTML
+  thread   Reconstruct conversation threads (branching included); export as JSON/HTML/MBOX/Maildir
 ```
 
 Run `czsplicer <command> --help` for full flags.
@@ -115,9 +115,8 @@ czsplicer merge prod/ -o all.cbor.zstd
 # Split into per-day files
 czsplicer split all.cbor.zstd --by day --out-dir days/
 
-# Split into per-session files. Aperture gives every request a unique
-# session_id, so --by session groups by conversation root (first message
-# hash); --min-records defaults to 2 to skip single-request throwaways.
+# Split into per-session files (session_id is auto-populated by Aperture;
+# --min-records defaults to 2 to skip single-request throwaways)
 czsplicer split all.cbor.zstd --by session --out-dir sessions/
 
 # Also: --by model, --by provider, --by path. Use --json for a manifest of the output files.
@@ -125,10 +124,11 @@ czsplicer split all.cbor.zstd --by session --out-dir sessions/
 
 ### Threading
 
-Reconstruct conversation branches from each request's echoed message history.
-Branch points (where the user went back and took a different path) are recovered
-automatically; the trie keys on normalized message-content hashes, so a string
-user message and its block-form continuation collapse to one node.
+Reconstruct conversation branches from each request's echoed message history,
+then render or export. Branch points (where the user went back and took a
+different path) are recovered automatically; the trie keys on normalized
+message-content hashes, so a string user message and its block-form
+continuation collapse to one node.
 
 ```sh
 # Default: JSON forest (roots, nodes, record_ids, tool_events) to stdout.
@@ -140,13 +140,20 @@ czsplicer thread prod/ --html --dark -o threads.html
 # Render through an Adium .AdiumMessageStyle bundle (optional, --variant Dark).
 czsplicer thread prod/ --theme Spike.AdiumMessageStyle -o threads.html
 
-# Redact secrets in the reconstructed output (same presets as `edit`).
+# Export as mbox (threaded by Message-ID / In-Reply-To) for a mail client.
+czsplicer thread prod/ --format mbox -o threads.mbox
+
+# Maildir (one file per message) with plain-text bodies instead of HTML.
+czsplicer thread prod/ --format maildir --body plain -o maildir/
+
+# Redact secrets in the rendered output (same presets as `edit`).
 czsplicer thread prod/ --html --redact-preset all -o threads.html
 ```
 
-Formats: `json` (default) and `html` (built-in long-form renderer, or an
-Adium `.AdiumMessageStyle` bundle via `--theme`). Redaction runs on message
-bodies and tool text *before* rendering, so secrets never reach the output.
+Formats: `json` (default), `html` (built-in), `mbox`, `maildir`. `--body`
+controls mbox/maildir body rendering: `plain`, `html` (multipart/alternative,
+default), `html-only`. Redaction runs on message bodies and tool text *before*
+rendering, so secrets never reach the output file.
 
 ### Integrity check
 
@@ -196,8 +203,7 @@ Directory arguments are expanded to their sorted `*.cbor.zstd` contents, so
 ## Development
 
 ```sh
-cargo test                       # 114 integration tests (synthetic fixtures)
-cargo test -- --ignored           # + lossless round-trip over real prod/ exports
+cargo test                       # 134 integration tests (synthetic fixtures)
 ```
 
 The repository includes a pre-commit hook (`hooks/pre-commit`) that runs
