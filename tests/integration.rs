@@ -3637,3 +3637,191 @@ fn maildir_creates_three_subdirs_with_messages() {
     let new_count = fs::read_dir(dir.join("new")).unwrap().count();
     assert_eq!(new_count, 3, "one file per node in new/ (sys, user, asst)");
 }
+
+// ===========================================================================
+// failures (error/failure analysis with sparkline histogram)
+// ===========================================================================
+
+/// NDJSON with a mix of status codes at known hours for deterministic testing.
+const FAIL_NDJSON: &str = "{\"id\":1,\"timestamp\":\"2026-06-20T08:00:00Z\",\"model\":\"alpha/one\",\"status_code\":503}\n\
+{\"id\":2,\"timestamp\":\"2026-06-20T08:30:00Z\",\"model\":\"alpha/one\",\"status_code\":503}\n\
+{\"id\":3,\"timestamp\":\"2026-06-20T20:00:00Z\",\"model\":\"alpha/one\",\"status_code\":503}\n\
+{\"id\":4,\"timestamp\":\"2026-06-20T07:00:00Z\",\"model\":\"beta/two\",\"status_code\":429}\n\
+{\"id\":5,\"timestamp\":\"2026-06-20T20:15:00Z\",\"model\":\"beta/two\",\"status_code\":429}\n\
+{\"id\":6,\"timestamp\":\"2026-06-20T12:00:00Z\",\"model\":\"alpha/one\",\"status_code\":200}\n\
+{\"id\":7,\"timestamp\":\"2026-06-20T14:00:00Z\",\"model\":\"beta/two\",\"status_code\":200}\n";
+
+#[test]
+fn failures_shows_only_non_2xx_by_default() {
+    let f = Fixture::from_ndjson(FAIL_NDJSON);
+    let out = Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("failures")
+        .arg(&f.cbor_zstd)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    // 503 and 429 should appear; 200 should not (default excludes 2xx).
+    assert!(text.contains("503"), "503 shown");
+    assert!(text.contains("429"), "429 shown");
+    assert!(
+        !text.lines().any(|l| l.trim_start().starts_with("200")),
+        "200 excluded by default"
+    );
+    assert!(
+        text.contains("alpha/one"),
+        "model breakdown shows alpha/one"
+    );
+    assert!(text.contains("beta/two"), "model breakdown shows beta/two");
+}
+
+#[test]
+fn failures_summary_counts_are_correct() {
+    let f = Fixture::from_ndjson(FAIL_NDJSON);
+    let out = Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("failures")
+        .arg(&f.cbor_zstd)
+        .assert()
+        .success();
+    // Summary goes to stderr.
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("5 of 7 records"),
+        "total shown/scanned correct"
+    );
+    assert!(
+        stderr.contains("2 distinct"),
+        "2 distinct status codes (503, 429)"
+    );
+}
+
+#[test]
+fn failures_all_includes_successes() {
+    let f = Fixture::from_ndjson(FAIL_NDJSON);
+    let out = Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("failures")
+        .arg(&f.cbor_zstd)
+        .arg("--all")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    // With --all, 200 should also appear.
+    assert!(
+        text.lines().any(|l| l.trim_start().starts_with("200")),
+        "200 included with --all"
+    );
+}
+
+#[test]
+fn failures_sparkline_contains_block_chars() {
+    let f = Fixture::from_ndjson(FAIL_NDJSON);
+    let out = Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("failures")
+        .arg(&f.cbor_zstd)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    // The sparkline uses at least one of these block characters.
+    assert!(
+        text.contains("█") || text.contains("▆") || text.contains("▄"),
+        "sparkline has block characters: {text}"
+    );
+    // Peak annotation format: "HH▲count"
+    assert!(text.contains("08▲2"), "peak annotation for hour 08 count 2");
+    assert!(
+        text.contains("20▲1"),
+        "peak annotation for hour 20 count 1 (429)"
+    );
+}
+
+#[test]
+fn failures_json_structure() {
+    let f = Fixture::from_ndjson(FAIL_NDJSON);
+    let out = Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("failures")
+        .arg(&f.cbor_zstd)
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
+    assert_eq!(v["records_scanned"], 7);
+    assert_eq!(v["records_shown"], 5);
+    let statuses = v["by_status"].as_array().unwrap();
+    assert_eq!(statuses.len(), 2, "2 distinct non-2xx codes");
+    // Sorted by count descending: 503 (3) then 429 (2).
+    assert_eq!(statuses[0]["status"], 503);
+    assert_eq!(statuses[0]["count"], 3);
+    assert_eq!(statuses[1]["status"], 429);
+    assert_eq!(statuses[1]["count"], 2);
+    // Verify by_hour array has 24 elements.
+    let hour_arr = statuses[0]["by_hour"].as_array().unwrap();
+    assert_eq!(hour_arr.len(), 24);
+    assert_eq!(
+        hour_arr[8].as_u64(),
+        Some(2),
+        "hour 08 has 2 events for 503"
+    );
+    assert_eq!(
+        hour_arr[20].as_u64(),
+        Some(1),
+        "hour 20 has 1 event for 503"
+    );
+    // Verify model attribution.
+    let models = &statuses[0]["by_model"];
+    assert_eq!(models["alpha/one"], 3);
+}
+
+#[test]
+fn failures_status_filter_restricts_output() {
+    let f = Fixture::from_ndjson(FAIL_NDJSON);
+    let out = Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("failures")
+        .arg(&f.cbor_zstd)
+        .arg("--status")
+        .arg("429")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("429"), "429 shown");
+    assert!(
+        !text.lines().any(|l| l.trim_start().starts_with("503")),
+        "503 excluded by --status 429"
+    );
+}
+
+#[test]
+fn failures_no_errors_reports_clean() {
+    let nd = "{\"id\":1,\"timestamp\":\"2026-06-20T08:00:00Z\",\"model\":\"alpha/one\",\"status_code\":200}\n";
+    let f = Fixture::from_ndjson(nd);
+    let out = Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("failures")
+        .arg(&f.cbor_zstd)
+        .assert()
+        .success();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("no failures") || stderr.contains("0 of"),
+        "reports no failures cleanly: {stderr}"
+    );
+}

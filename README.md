@@ -41,6 +41,7 @@ Commands:
   split    Split one stream into per-group `.cbor.zstd` files (by day/session/model/path)
   stats    Aggregate stats: tokens, cost, durations, by-model / by-path
   thread   Reconstruct conversation threads (branching included); export as JSON/HTML/MBOX/Maildir
+  failures  Error/failure analysis: sparkline histogram by hour-of-day, status×model breakdown
 ```
 
 Run `czsplicer <command> --help` for full flags.
@@ -155,6 +156,26 @@ controls mbox/maildir body rendering: `plain`, `html` (multipart/alternative,
 default), `html-only`. Redaction runs on message bodies and tool text *before*
 rendering, so secrets never reach the output file.
 
+### Failure analysis
+
+See when errors happen and which models are responsible. The default view shows a
+sparkline histogram of non-2xx status codes by hour-of-day, plus a per-model
+breakdown — so you can spot bursty provider incidents at a glance.
+
+```sh
+# Sparkline histogram + status×model breakdown (non-2xx only).
+czsplicer failures prod/
+
+# Include 2xx for baseline contrast (error rate vs. success).
+czsplicer failures prod/ --all
+
+# Focus on one status code (range shorthand works too: --status 5xx).
+czsplicer failures prod/ --status 503
+
+# Structured output for dashboards.
+czsplicer failures prod/ --json
+```
+
 ### Integrity check
 
 ```sh
@@ -203,7 +224,7 @@ Directory arguments are expanded to their sorted `*.cbor.zstd` contents, so
 ## Development
 
 ```sh
-cargo test                       # 143 integration tests (synthetic fixtures)
+cargo test                       # 141 integration tests (synthetic fixtures)
 ```
 
 The repository includes a pre-commit hook (`hooks/pre-commit`) that runs

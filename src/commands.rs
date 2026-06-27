@@ -770,6 +770,211 @@ fn human_dur(ms: i64) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// failures
+// ---------------------------------------------------------------------------
+
+#[derive(clap::Args)]
+pub struct FailuresArgs {
+    #[arg(required = true)]
+    pub files: Vec<PathBuf>,
+    #[arg(long)]
+    pub json: bool,
+    /// Include 2xx successes in the histogram (baseline contrast).
+    #[arg(long)]
+    pub all: bool,
+    #[command(flatten)]
+    pub filter: FilterArgs,
+}
+
+#[derive(Default)]
+struct FailBucket {
+    by_hour: [u64; 24],
+    by_model: BTreeMap<String, u64>,
+    total: u64,
+}
+
+/// Inline sparkline characters for 8 levels (low → high).
+const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// Render a 24-element hour histogram as a single-line sparkline string.
+fn sparkline(hours: &[u64; 24]) -> String {
+    let max = *hours.iter().max().unwrap_or(&0);
+    if max == 0 {
+        return " ".repeat(24);
+    }
+    hours
+        .iter()
+        .map(|&c| {
+            if c == 0 {
+                ' '
+            } else if max == 1 {
+                SPARK[3]
+            } else {
+                SPARK[(((c - 1) * 7) as usize / (max - 1) as usize).min(7)]
+            }
+        })
+        .collect()
+}
+
+/// Format the top-N non-zero hours as "08▲10  20▲12" annotations.
+fn peak_hours(hours: &[u64; 24], top: usize) -> String {
+    let mut peaks: Vec<(usize, u64)> = (0..24)
+        .filter(|&h| hours[h] > 0)
+        .map(|h| (h, hours[h]))
+        .collect();
+    peaks.sort_by(|a, b| b.1.cmp(&a.1));
+    peaks
+        .iter()
+        .take(top)
+        .map(|(h, c)| format!("{h:02}▲{c}"))
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+pub fn cmd_failures(args: &FailuresArgs) -> Result<()> {
+    let filter = args.filter.build()?;
+    let mut buckets: BTreeMap<i64, FailBucket> = BTreeMap::new();
+    let mut total_scanned = 0u64;
+
+    for_each_matching_record(&args.files, &filter, |rec| {
+        total_scanned += 1;
+        let status = format::rec_int(&rec, "status_code").unwrap_or(0);
+        // Default: only collect non-2xx. --all disables this.
+        if !args.all && (200..300).contains(&status) {
+            return Ok(());
+        }
+        let ts = format::rec_str(&rec, "timestamp").unwrap_or_default();
+        let hour = ts
+            .get(11..13)
+            .and_then(|h| h.parse::<usize>().ok())
+            .unwrap_or(0)
+            .min(23);
+        let model = format::rec_str(&rec, "model").unwrap_or_default();
+        let b = buckets.entry(status).or_default();
+        b.by_hour[hour] += 1;
+        b.total += 1;
+        *b.by_model.entry(model).or_insert(0) += 1;
+        Ok(())
+    })?;
+
+    let total_shown: u64 = buckets.values().map(|b| b.total).sum();
+
+    if args.json {
+        return failures_json(&buckets, total_scanned, total_shown);
+    }
+
+    if buckets.is_empty() {
+        eprintln!("no failures found ({total_scanned} records scanned)");
+        return Ok(());
+    }
+
+    let pct = if total_scanned > 0 {
+        total_shown as f64 * 100.0 / total_scanned as f64
+    } else {
+        0.0
+    };
+    eprintln!(
+        "FAILURES: {} of {} records ({:.1}%) — {} distinct status code(s)",
+        total_shown,
+        total_scanned,
+        pct,
+        buckets.len()
+    );
+    println!();
+
+    // Sort by total descending.
+    let mut sorted: Vec<(&i64, &FailBucket)> = buckets.iter().collect();
+    sorted.sort_by(|a, b| b.1.total.cmp(&a.1.total));
+
+    // Sparkline table.
+    for &(status, b) in &sorted {
+        let spark = sparkline(&b.by_hour);
+        let peaks = peak_hours(&b.by_hour, 4);
+        println!("{status:>5}  {spark}  {:>5}  {peaks}", b.total);
+    }
+    // Hour ruler aligned under the 24-char sparkline (7-char "NNNNN  " indent).
+    // Ticks at hours 0, 8, 16, 23 — the sparkline itself is exactly 24 chars.
+    println!("       └───────┬───────┬──────┘");
+    println!("       0       8       16    23");
+    println!();
+
+    // Model breakdown (only non-2xx unless --all).
+    let mut model_map: BTreeMap<String, BTreeMap<i64, u64>> = BTreeMap::new();
+    for &(status, b) in &sorted {
+        for (model, &cnt) in &b.by_model {
+            *model_map
+                .entry(model.clone())
+                .or_default()
+                .entry(*status)
+                .or_insert(0) += cnt;
+        }
+    }
+    let mut model_rows: Vec<(&String, u64, &BTreeMap<i64, u64>)> = model_map
+        .iter()
+        .map(|(m, codes)| {
+            let tot: u64 = codes.values().sum();
+            (m, tot, codes)
+        })
+        .collect();
+    model_rows.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let label = if args.all {
+        "BY MODEL (all records)"
+    } else {
+        "BY MODEL (errors only)"
+    };
+    println!("{label}");
+    for (model, total, codes) in &model_rows {
+        let code_strs: Vec<String> = codes.iter().map(|(s, c)| format!("{s}×{c}")).collect();
+        println!("  {:<44} {:>5}  {}", model, total, code_strs.join("  "));
+    }
+
+    Ok(())
+}
+
+fn failures_json(
+    buckets: &BTreeMap<i64, FailBucket>,
+    total_scanned: u64,
+    total_shown: u64,
+) -> Result<()> {
+    let mut by_status = Vec::new();
+    for (status, b) in buckets {
+        let hour_arr: Vec<u64> = b.by_hour.to_vec();
+        let model_obj: serde_json::Value = b
+            .by_model
+            .iter()
+            .map(|(m, c)| (m.clone(), serde_json::json!(c)))
+            .collect();
+        by_status.push(serde_json::json!({
+            "status": status,
+            "count": b.total,
+            "by_hour": hour_arr,
+            "by_model": model_obj,
+        }));
+    }
+    // Sort by count descending.
+    by_status.sort_by(|a, b| {
+        b["count"]
+            .as_u64()
+            .unwrap_or(0)
+            .cmp(&a["count"].as_u64().unwrap_or(0))
+    });
+    let pct = if total_scanned > 0 {
+        total_shown as f64 * 100.0 / total_scanned as f64
+    } else {
+        0.0
+    };
+    let out = serde_json::json!({
+        "records_scanned": total_scanned,
+        "records_shown": total_shown,
+        "error_rate": (pct / 100.0),
+        "by_status": by_status,
+    });
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // grep
 // ---------------------------------------------------------------------------
 

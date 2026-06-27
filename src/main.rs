@@ -48,6 +48,8 @@ enum Cmd {
     Split(SplitArgs),
     /// Reconstruct conversation threads from request message histories (branches included).
     Thread(ThreadArgs),
+    /// Show error/failure patterns: sparkline histogram by hour-of-day, status×model breakdown.
+    Failures(FailuresArgs),
     /// Aggregate stats: tokens, cost, durations, by-model / by-path.
     Stats(StatsArgs),
 }
@@ -95,6 +97,10 @@ fn main() -> Result<()> {
         Cmd::Thread(mut a) => {
             a.files = expand(a.files)?;
             cmd_thread(&a)
+        }
+        Cmd::Failures(mut a) => {
+            a.files = expand(a.files)?;
+            cmd_failures(&a)
         }
     }
 }
