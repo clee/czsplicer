@@ -1,7 +1,10 @@
+mod builtin;
 mod commands;
 mod filter;
 mod format;
+mod markdown;
 mod render;
+mod theme;
 mod thread;
 
 use anyhow::Result;

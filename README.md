@@ -40,7 +40,7 @@ Commands:
   merge    Merge many `.cbor.zstd` files into one (CBOR -> CBOR, streaming)
   split    Split one stream into per-group `.cbor.zstd` files (by day/session/model/path)
   stats    Aggregate stats: tokens, cost, durations, by-model / by-path
-  thread   Reconstruct conversation threads (branching included); export as JSON
+  thread   Reconstruct conversation threads (branching included); export as JSON/HTML
 ```
 
 Run `czsplicer <command> --help` for full flags.
@@ -134,12 +134,19 @@ user message and its block-form continuation collapse to one node.
 # Default: JSON forest (roots, nodes, record_ids, tool_events) to stdout.
 czsplicer thread prod/
 
+# Self-contained long-form HTML (one file, no external theme).
+czsplicer thread prod/ --html --dark -o threads.html
+
+# Render through an Adium .AdiumMessageStyle bundle (optional, --variant Dark).
+czsplicer thread prod/ --theme Spike.AdiumMessageStyle -o threads.html
+
 # Redact secrets in the reconstructed output (same presets as `edit`).
-czsplicer thread prod/ --redact-preset all -o threads.json
+czsplicer thread prod/ --html --redact-preset all -o threads.html
 ```
 
-Redaction runs on message bodies and tool text *before* reconstruction, so
-secrets never reach the output.
+Formats: `json` (default) and `html` (built-in long-form renderer, or an
+Adium `.AdiumMessageStyle` bundle via `--theme`). Redaction runs on message
+bodies and tool text *before* rendering, so secrets never reach the output.
 
 ### Integrity check
 
@@ -189,7 +196,7 @@ Directory arguments are expanded to their sorted `*.cbor.zstd` contents, so
 ## Development
 
 ```sh
-cargo test                       # 98 integration tests (synthetic fixtures)
+cargo test                       # 114 integration tests (synthetic fixtures)
 cargo test -- --ignored           # + lossless round-trip over real prod/ exports
 ```
 

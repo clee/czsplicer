@@ -1,5 +1,7 @@
+use crate::builtin;
 use crate::filter::{Filter, FilterArgs};
 use crate::format::{self, RecordStream};
+use crate::theme;
 use crate::thread::{conversation_root, ThreadBuilder};
 use anyhow::{anyhow, Result};
 use std::collections::BTreeMap;
@@ -1318,9 +1320,22 @@ pub fn cmd_split(args: &SplitArgs) -> Result<()> {
 pub struct ThreadArgs {
     #[arg(required = true)]
     pub files: Vec<PathBuf>,
-    /// Write JSON to this path instead of stdout (`-` for stdout).
+    /// Write JSON/HTML/MBOX/Maildir to this path instead of stdout (`-` for stdout).
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+    /// Emit self-contained HTML using the built-in long-form renderer.
+    #[arg(long)]
+    pub html: bool,
+    /// Dark mode for the built-in HTML renderer.
+    #[arg(long)]
+    pub dark: bool,
+    /// Render HTML using an Adium `.AdiumMessageStyle` bundle instead of the
+    /// built-in renderer.
+    #[arg(long, value_name = "BUNDLE")]
+    pub theme: Option<PathBuf>,
+    /// Adium style variant to apply (e.g. "Dark").
+    #[arg(long)]
+    pub variant: Option<String>,
     /// Redact secrets matching this regex (repeatable). Applied to message
     /// bodies and tool text before rendering.
     #[arg(long, value_name = "REGEX")]
@@ -1366,6 +1381,30 @@ pub fn cmd_thread(args: &ThreadArgs) -> Result<()> {
         Ok(())
     })?;
     let j = builder.to_json(total, with_messages);
+
+    // Built-in long-form HTML renderer (no external theme bundle).
+    if args.html && args.theme.is_none() {
+        let html = builtin::render_html(&j, args.dark)?;
+        write_output(args.output.as_ref(), html.as_bytes(), "html")?;
+        eprintln!(
+            "{}; built-in HTML{}",
+            thread_summary(total, with_messages, &j),
+            if args.dark { " (dark)" } else { "" }
+        );
+        return Ok(());
+    }
+
+    // HTML (themed) path: render the forest through an Adium message style.
+    if let Some(theme_path) = &args.theme {
+        let html = theme::render_forest(&j, theme_path, args.variant.as_deref())?;
+        write_output(args.output.as_ref(), html.as_bytes(), "html")?;
+        eprintln!(
+            "{}; themed -> {}",
+            thread_summary(total, with_messages, &j),
+            theme_path.display()
+        );
+        return Ok(());
+    }
 
     let pretty = serde_json::to_string_pretty(&j)?;
     let bytes = pretty.into_bytes();

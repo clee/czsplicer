@@ -1,0 +1,8 @@
+{
+  "CFBundleName": "Spike",
+  "CFBundleIdentifier": "org.czsplicer.spike",
+  "CFBundleVersion": "1.0",
+  "MessageViewVersion": 1,
+  "ShowsUserIcons": true,
+  "DefaultVariant": "Light"
+}

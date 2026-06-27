@@ -1,0 +1,10 @@
+:root {
+  --cz-bg: #1c1c1e;
+  --cz-fg: #f2f2f7;
+  --cz-bubble-in: #2c2c2e;
+  --cz-bubble-out: #0a84ff;
+  --cz-sender: #6cb6ff;
+}
+body { color: var(--cz-fg); }
+.line.outgoing .bubble { color: #fff; }
+.bubble { border-color: #3a3a3c; }

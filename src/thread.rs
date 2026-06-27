@@ -563,6 +563,38 @@ fn extract_preview(normalized: &Json) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Forest traversal helpers (shared by renderers)
+// ---------------------------------------------------------------------------
+
+/// Collect every root-to-leaf path as a Vec of node references. Used by the
+/// HTML renderers to decompose a branched forest into linear conversations.
+pub fn all_paths(forest: &Json) -> Vec<Vec<&Json>> {
+    let mut out = Vec::new();
+    let Some(trees) = forest.get("trees").and_then(|t| t.as_array()) else {
+        return out;
+    };
+    for root in trees {
+        let mut cur = Vec::new();
+        walk(root, &mut cur, &mut out);
+    }
+    out
+}
+
+fn walk<'a>(node: &'a Json, cur: &mut Vec<&'a Json>, out: &mut Vec<Vec<&'a Json>>) {
+    cur.push(node);
+    let children = node.get("children").and_then(|c| c.as_array());
+    let empty = children.as_ref().map_or(true, |c| c.is_empty());
+    if empty {
+        out.push(cur.clone());
+    } else if let Some(kids) = children {
+        for k in kids {
+            walk(k, cur, out);
+        }
+    }
+    cur.pop();
+}
+
+// ---------------------------------------------------------------------------
 // Conversation-root key (shared by `split --by session`)
 // ---------------------------------------------------------------------------
 

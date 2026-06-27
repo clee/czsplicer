@@ -1,0 +1,60 @@
+/* Spike.AdiumMessageStyle base styles (MIT, hand-authored for czsplicer). */
+* { word-wrap: break-word; }
+body {
+  margin: 0;
+  padding: 16px;
+  font: 14px/1.45 -apple-system, "Segoe UI", system-ui, sans-serif;
+  background: var(--cz-bg, #f7f7f9);
+  color: var(--cz-fg, #1c1c1e);
+}
+#Chat { max-width: 720px; margin: 0 auto; }
+.path-separator {
+  max-width: 720px;
+  margin: 24px auto 8px;
+  font: 11px ui-monospace, monospace;
+  color: #888;
+  border-top: 1px dashed #ccc;
+  padding-top: 8px;
+}
+
+/* Per-message row. The template's %messageClasses% lands in the class attr. */
+.line { display: flex; gap: 10px; margin: 6px 0; align-items: flex-start; }
+.line.incoming { flex-direction: row; }
+.line.outgoing { flex-direction: row-reverse; }
+
+.bubble {
+  max-width: 76%;
+  padding: 8px 12px;
+  border-radius: 14px;
+  white-space: pre-wrap;
+  background: var(--cz-bubble-in, #ffffff);
+  border: 1px solid #e5e5ea;
+}
+.line.outgoing .bubble {
+  background: var(--cz-bubble-out, #007aff);
+  color: #fff;
+  border-color: transparent;
+}
+
+.meta {
+  font-size: 11px;
+  color: #8a8a8e;
+  margin: 0 4px;
+  align-self: flex-end;
+}
+.sender { font-weight: 600; }
+.sender.incoming { color: var(--cz-sender, #007aff); }
+.sender.outgoing { color: #6b6b6f; }
+
+/* Consecutive (NextContent) messages drop the header and tighten spacing. */
+.consecutive { margin-top: -2px; }
+.consecutive .sender, .consecutive .meta { display: none; }
+
+/* Status / event line (Status.html). */
+.status-line {
+  text-align: center;
+  font-size: 11px;
+  color: #999;
+  margin: 12px 0;
+  font-style: italic;
+}

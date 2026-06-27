@@ -1,0 +1,11 @@
+highlight.js v11.9.0 — BSD-3-Clause
+Copyright (c) 2006-, Ivan Sagalaev and contributors
+Source: https://github.com/highlightjs/highlight.js
+License header is preserved at the top of highlight.min.js.
+
+GitHub light/dark CSS themes are part of highlight.js (same license).
+
+These files are vendored (not a dependency) and embedded into the built-in
+long-form HTML renderer via include_str!. They render <pre><code> blocks
+produced by src/markdown.rs; languages not in the common-11 bundle fall back
+to plaintext rendering (no error).

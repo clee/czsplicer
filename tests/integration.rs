@@ -2744,3 +2744,335 @@ fn thread_survives_redaction_that_breaks_json_body() {
         .assert()
         .success();
 }
+// ===========================================================================
+// tree --theme (Adium message-style rendering)
+// ===========================================================================
+//
+// Themed HTML rendering: an Adium `.AdiumMessageStyle` bundle is loaded,
+// its `%keyword%` templates are substituted, and each root-to-leaf path is
+// rendered as a chat section. These tests use the bundled Spike fixture theme.
+
+const SPIKE_THEME: &str = "tests/fixtures/Spike.AdiumMessageStyle";
+
+fn themed_html(ndjson: &str, extra: &[&str]) -> String {
+    let f = Fixture::from_ndjson(ndjson);
+    let out = Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("thread")
+        .arg(&f.cbor_zstd)
+        .arg("--theme")
+        .arg(SPIKE_THEME)
+        .args(extra)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[test]
+fn theme_substitutes_keywords_and_roles() {
+    // Single record, one user turn. The output must carry the substituted
+    // sender ("you" for user / outgoing) and the message text.
+    let nd = rec(1, &body_with_messages("SYS", &[("user", "hello theme")]));
+    let html = themed_html(&nd, &[]);
+    assert!(html.contains("<title>Spike"), "document title from theme");
+    assert!(html.contains(">you<"), "user maps to outgoing sender 'you'");
+    assert!(html.contains("hello theme"), "message text substituted");
+    assert!(
+        html.contains("class=\"line outgoing message outgoing\""),
+        "outgoing message class emitted"
+    );
+    assert!(html.contains("id=\"Chat\""), "Chat container present");
+}
+
+#[test]
+fn theme_assistant_resolves_model_as_sender() {
+    // An assistant turn whose owning record carries model "alpha/one". The
+    // rendered sender must be the model name, not the literal "assistant".
+    let nd = serde_json::json!({
+        "id":1,"model":"alpha/one","path":"/v1/x","status_code":200,
+        "capture":{"requestBody":body_with_messages("S",&[("user","q"),("assistant","a")])}
+    })
+    .to_string();
+    let html = themed_html(&nd, &[]);
+    assert!(
+        html.contains(">alpha/one<"),
+        "assistant sender = model name"
+    );
+    assert!(
+        html.contains("class=\"line incoming message incoming\""),
+        "assistant maps to incoming"
+    );
+}
+
+#[test]
+fn theme_branches_decompose_into_paths() {
+    // Two records diverging at the first assistant turn => two root-to-leaf
+    // paths. The HTML must contain both branch texts and a separator per path.
+    let nd = format!(
+        "{}\n{}\n",
+        rec(
+            1,
+            &body_with_messages("S", &[("user", "q"), ("assistant", "branch-a")])
+        ),
+        rec(
+            2,
+            &body_with_messages("S", &[("user", "q"), ("assistant", "branch-b")])
+        ),
+    );
+    let html = themed_html(&nd, &[]);
+    assert!(html.contains("branch-a"), "both branch texts rendered");
+    assert!(html.contains("branch-b"));
+    // 2 leaves => 2 separator divs (avoid matching the CSS class definition).
+    let n = html.matches("class=\"path-separator\"").count();
+    assert_eq!(n, 2, "one path-separator per leaf path");
+}
+
+#[test]
+fn theme_variant_css_inlined() {
+    let nd = rec(1, &body_with_messages("S", &[("user", "x")]));
+    let html = themed_html(&nd, &["--variant", "Dark"]);
+    assert!(
+        html.contains("--cz-bg: #1c1c1e"),
+        "Dark variant CSS inlined"
+    );
+    // And an unknown variant leaves a breadcrumb comment instead of crashing.
+    let html2 = themed_html(&nd, &["--variant", "Nonexistent"]);
+    assert!(
+        html2.contains("unknown variant"),
+        "unknown variant is non-fatal"
+    );
+}
+
+#[test]
+fn theme_consecutive_messages_collapse() {
+    // Two user messages in a row (no assistant between) => the second gets
+    // the "consecutive" CSS class via NextContent.html selection.
+    let body = serde_json::json!({
+        "messages":[
+            {"role":"system","content":"S"},
+            {"role":"user","content":"first"},
+            {"role":"user","content":"second"}
+        ]
+    })
+    .to_string();
+    let nd = rec(1, &body);
+    let html = themed_html(&nd, &[]);
+    assert!(
+        html.contains("consecutive"),
+        "consecutive same-sender messages coalesce via NextContent"
+    );
+}
+
+// ===========================================================================
+// tree --html (built-in long-form renderer)
+// ===========================================================================
+
+fn builtin_html(ndjson: &str, extra: &[&str]) -> String {
+    let f = Fixture::from_ndjson(ndjson);
+    let out = Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("thread")
+        .arg(&f.cbor_zstd)
+        .arg("--html")
+        .args(extra)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[test]
+fn builtin_html_renders_summary_and_turns() {
+    let nd = rec(1, &body_with_messages("SYS", &[("user", "hello")]));
+    let html = builtin_html(&nd, &[]);
+    assert!(html.contains("<title>Conversation"), "document title");
+    assert!(html.contains("<h1>Conversation</h1>"), "summary header");
+    assert!(html.contains("class=\"summary-grid\""), "summary counts");
+    assert!(html.contains("class=\"turn turn-user\""), "user turn");
+    assert!(
+        html.contains("var hljs="),
+        "highlight.js is embedded (self-contained)"
+    );
+    assert!(
+        html.contains("hljs.highlightAll"),
+        "highlight-all invoked on load"
+    );
+}
+
+#[test]
+fn builtin_html_markdown_body_for_assistant() {
+    // Assistant message with a fenced code block must render to <pre><code>
+    // with a language class for the client-side highlighter.
+    let nd = serde_json::json!({
+        "id":1,"model":"alpha/one","path":"/v1/x","status_code":200,
+        "capture":{"requestBody":serde_json::json!({
+            "messages":[
+                {"role":"system","content":"S"},
+                {"role":"user","content":"q"},
+                {"role":"assistant","content":"Here:\n```rust\nfn x() {}\n```\n"}
+            ]
+        }).to_string()}
+    })
+    .to_string();
+    let html = builtin_html(&nd, &[]);
+    assert!(html.contains("<pre><code class=\"language-rust\">"));
+    assert!(html.contains("class=\"turn turn-assistant\""));
+}
+
+#[test]
+fn builtin_html_dark_mode_flag() {
+    let nd = rec(1, &body_with_messages("S", &[("user", "x")]));
+    let light = builtin_html(&nd, &[]);
+    let dark = builtin_html(&nd, &["--dark"]);
+    assert!(light.contains("data-theme=\"light\""));
+    assert!(dark.contains("data-theme=\"dark\""));
+}
+
+#[test]
+fn builtin_html_path_selector_when_branched() {
+    // Two divergent paths => path-selector nav appears with two links.
+    let nd = format!(
+        "{}\n{}\n",
+        rec(
+            1,
+            &body_with_messages("S", &[("user", "q"), ("assistant", "a")])
+        ),
+        rec(
+            2,
+            &body_with_messages("S", &[("user", "q"), ("assistant", "b")])
+        ),
+    );
+    let html = builtin_html(&nd, &[]);
+    assert!(html.contains("class=\"path-selector\""), "path nav present");
+    assert_eq!(
+        html.matches("class=\"path-link\"").count(),
+        2,
+        "two path links for two leaves"
+    );
+}
+
+#[test]
+fn builtin_html_status_chips_colored() {
+    // A failed record should carry an HTTP status chip.
+    let nd = serde_json::json!({
+        "id":1,"model":"m","path":"/v1/x","status_code":500,
+        "capture":{"requestBody":body_with_messages("S",&[("user","q")])}
+    })
+    .to_string();
+    let html = builtin_html(&nd, &[]);
+    assert!(
+        html.contains("data-status=\"500\""),
+        "5xx status chip present"
+    );
+}
+
+#[test]
+fn thread_redact_custom_regex_scrubs_rendered_html() {
+    // A secret embedded in message content must not survive into the HTML.
+    let nd = serde_json::json!({
+        "id":1,"model":"alpha/one","path":"/v1/x","status_code":200,
+        "capture":{"requestBody":serde_json::json!({
+            "messages":[
+                {"role":"system","content":"S"},
+                {"role":"user","content":"my key is sk-abcdefghijklmnopqrstuvwxyz"}
+            ]
+        }).to_string()}
+    })
+    .to_string();
+    let f = Fixture::from_ndjson(&nd);
+    let out = Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("thread")
+        .arg(&f.cbor_zstd)
+        .arg("--html")
+        .arg("--redact")
+        .arg(r"sk-[A-Za-z0-9]{20,}")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let html = String::from_utf8_lossy(&out);
+    assert!(
+        !html.contains("sk-abcdefghijklmnopqrstuvwxyz"),
+        "raw secret must not appear in rendered HTML"
+    );
+    assert!(html.contains("[REDACTED]"), "redaction token inserted");
+}
+
+#[test]
+fn thread_redact_preset_all_and_custom_replacement() {
+    let nd = serde_json::json!({
+        "id":1,"model":"alpha/one","path":"/v1/x","status_code":200,
+        "capture":{"requestBody":serde_json::json!({
+            "messages":[
+                {"role":"system","content":"S"},
+                {"role":"user","content":"reach me at lee@example.com please"}
+            ]
+        }).to_string()}
+    })
+    .to_string();
+    let f = Fixture::from_ndjson(&nd);
+    let out = Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("thread")
+        .arg(&f.cbor_zstd)
+        .arg("--html")
+        .arg("--redact-preset")
+        .arg("all")
+        .arg("--redact-replacement")
+        .arg("***")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let html = String::from_utf8_lossy(&out);
+    assert!(!html.contains("lee@example.com"), "email preset scrubbed");
+    assert!(html.contains("***"), "custom replacement token used");
+}
+
+#[test]
+fn thread_redact_secretkey_preset_scrubs_labeled_credentials() {
+    // The `secretkey` preset must catch credentials blocks in both shapes:
+    // markdown-bold (**Secret access key:** `HEX`) and config-aligned
+    // (Secret key:    HEX), as found in real Aperture captures.
+    let nd = serde_json::json!({
+        "id":1,"model":"alpha/one","path":"/v1/x","status_code":200,
+        "capture":{"requestBody":serde_json::json!({
+            "messages":[
+                {"role":"system","content":"S"},
+                {"role":"assistant","content":"Creds:\n- **Secret access key:** `defe6655b314dae44758eb40d323b9934a34341c5d678b67896cecac24085341`\nSecret key:          aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"}
+            ]
+        }).to_string()}
+    })
+    .to_string();
+    let f = Fixture::from_ndjson(&nd);
+    let out = Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("thread")
+        .arg(&f.cbor_zstd)
+        .arg("--html")
+        .arg("--redact-preset")
+        .arg("secretkey")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let html = String::from_utf8_lossy(&out);
+    assert!(
+        !html.contains("defe6655b314dae44758eb40d323b9934"),
+        "markdown-bold labeled secret scrubbed"
+    );
+    assert!(
+        !html.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        "config-aligned labeled secret scrubbed"
+    );
+    assert!(html.contains("[REDACTED]"));
+}
