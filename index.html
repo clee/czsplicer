@@ -217,7 +217,7 @@
 
 <header class="hero">
   <div class="wrap">
-    <span class="badge">v0.2.0 · MIT</span>
+    <span class="badge">v0.3.0 · MIT</span>
     <h1 class="title">cz<span class="accent">splicer</span></h1>
     <p class="tagline">
       Inspect, extract, edit/redact, and repack <code>.cbor.zstd</code> log streams.
@@ -271,7 +271,11 @@ estimated cost:       <span class="c-warn">$22.4848</span>
 <span class="c-dim">model                       recs    in_tok   out_tok      cost$</span>
 <span class="c-dim">------------------------------------------------------------------</span>
 ollama/kimi-k2.6:cloud       178  29786107   135895    22.2181
-ollama/deepseek-v4-pro:cloud  22    587059    13016     0.2667</pre>
+ollama/deepseek-v4-pro:cloud  22    587059    13016     0.2667</span>
+
+<span class="c-prompt">$</span> <span class="c-cmd">czsplicer thread prod/ --html --dark -o threads.html</span>
+<span class="c-dim">4020 record(s) (3988 with messages) -> 142 thread(s), 38 branch point(s); built-in HTML (dark)</span>
+<span class="c-dim">wrote 2.74 MB of html -> threads.html</span></pre>
     </div>
   </div>
 </section>
@@ -292,6 +296,10 @@ ollama/deepseek-v4-pro:cloud  22    587059    13016     0.2667</pre>
       <li>
         <span class="bullet">▸</span>
         <span class="text"><strong>Built-in redaction.</strong> Nine canned secret presets (<code>email</code>, <code>jwt</code>, <code>apikey</code>, <code>bearer</code>, <code>aws</code>, …) plus custom regexes, with one-pass strip-and-drop.</span>
+      </li>
+      <li>
+        <span class="bullet">▸</span>
+        <span class="text"><strong>Conversation threading.</strong> Reconstruct branching chat histories from each request's echoed messages — a trie over content hashes recovers every branch point. Render as JSON, self-contained HTML, or export to mbox/Maildir.</span>
       </li>
       <li>
         <span class="bullet">▸</span>
@@ -316,6 +324,7 @@ ollama/deepseek-v4-pro:cloud  22    587059    13016     0.2667</pre>
       <div class="cmd-card"><div class="name">stats &lt;files&gt;</div><div class="desc">Aggregate tokens, cost, durations; by model or path.</div></div>
       <div class="cmd-card"><div class="name">merge &lt;files&gt;</div><div class="desc">Combine many .cbor.zstd files into one (CBOR→CBOR).</div></div>
       <div class="cmd-card"><div class="name">split &lt;files&gt;</div><div class="desc">Split into per-group files: day / session / model / path.</div></div>
+      <div class="cmd-card"><div class="name">thread &lt;files&gt;</div><div class="desc">Reconstruct conversation threads (branching); JSON / HTML / mbox / Maildir.</div></div>
     </div>
   </div>
 </section>
@@ -325,7 +334,7 @@ ollama/deepseek-v4-pro:cloud  22    587059    13016     0.2667</pre>
   <div class="wrap">
     <h2 class="section-title">/ shared filter flags</h2>
     <p style="color:var(--text-dim); margin-bottom:20px;">
-      Every selection command (<code>ls</code>, <code>extract</code>, <code>grep</code>, <code>edit</code>, <code>stats</code>, <code>merge</code>, <code>split</code>) accepts these:
+      Every selection command (<code>ls</code>, <code>extract</code>, <code>grep</code>, <code>edit</code>, <code>stats</code>, <code>merge</code>, <code>split</code>, <code>thread</code>) accepts these:
     </p>
     <table>
       <thead><tr><th>Flag</th><th>Matches</th></tr></thead>
@@ -333,6 +342,7 @@ ollama/deepseek-v4-pro:cloud  22    587059    13016     0.2667</pre>
         <tr><td><code>--id</code></td><td class="desc">record id or inclusive range (e.g. <code>5</code> or <code>5-10</code>)</td></tr>
         <tr><td><code>--model</code></td><td class="desc">exact model name</td></tr>
         <tr><td><code>--provider</code></td><td class="desc">model prefix before <code>/</code></td></tr>
+        <tr><td><code>--client</code></td><td class="desc">request <code>User-Agent</code> prefix, case-insensitive (repeatable)</td></tr>
         <tr><td><code>--path</code></td><td class="desc">exact request path</td></tr>
         <tr><td><code>--status</code></td><td class="desc">HTTP status code</td></tr>
         <tr><td><code>--since</code> / <code>--until</code></td><td class="desc">ISO-8601 time range (bare date = inclusive whole day)</td></tr>
