@@ -63,6 +63,9 @@ czsplicer grep 'claude-' prod/ --field capture.responseBody --count
 czsplicer stats prod/ --by model
 czsplicer stats prod/ --by provider
 czsplicer stats prod/ --by status
+
+# CSV for spreadsheets (also: ls --format csv, failures --format csv)
+czsplicer stats prod/ --by model --format csv -o by-model.csv
 ```
 
 ### Extracting & repacking (the round-trip)
@@ -227,7 +230,7 @@ Directory arguments are expanded to their sorted `*.cbor.zstd` contents, so
 ## Development
 
 ```sh
-cargo test                       # 164 tests (146 integration + 18 unit, synthetic fixtures)
+cargo test                       # 175 passed, 1 ignored (2 suites; unit tests in mailbox/mermaid/csv)
 ```
 
 The repository includes a pre-commit hook (`hooks/pre-commit`) that runs

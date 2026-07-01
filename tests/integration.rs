@@ -85,6 +85,52 @@ fn ls_json_is_ndjson() {
 }
 
 #[test]
+fn ls_csv_has_header_and_rows() {
+    let f = fixture();
+    let out = f
+        .cmd()
+        .arg("ls")
+        .arg(&f.cbor_zstd)
+        .arg("--format")
+        .arg("csv")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = s.lines().collect();
+    assert_eq!(
+        lines[0], "id,timestamp,model,path,status_code,input_tokens,output_tokens,cost_usd",
+        "csv header: {s}"
+    );
+    // 3 fixture records → 3 data rows after the header.
+    assert_eq!(lines.len(), 4, "expected header + 3 rows: {s}");
+    // First data row's first field is the id.
+    assert!(lines[1].starts_with("1,"), "first row id: {}", lines[1]);
+}
+
+#[test]
+fn ls_csv_quotes_comma_in_path() {
+    // A path containing a comma must be RFC 4180 quoted.
+    let nd = "{\"id\":1,\"timestamp\":\"2026-06-20T08:00:00Z\",\"model\":\"m\",\"path\":\"/a,b\",\"status_code\":200}\n";
+    let f = Fixture::from_ndjson(nd);
+    let out = f
+        .cmd()
+        .arg("ls")
+        .arg(&f.cbor_zstd)
+        .arg("--format")
+        .arg("csv")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).unwrap();
+    assert!(s.contains("\"/a,b\""), "comma path should be quoted: {s}");
+}
+
+#[test]
 fn ls_filter_by_model() {
     let f = fixture();
     let out = f
@@ -1176,6 +1222,54 @@ fn stats_mermaid_empty_when_all_costs_zero() {
     assert!(
         !s.contains("```mermaid"),
         "all-zero costs should emit nothing: {s}"
+    );
+}
+
+#[test]
+fn stats_csv_emits_header_and_bucket_rows() {
+    // 3 models with distinct costs → 3 rows sorted by cost desc.
+    let mut nd = String::new();
+    for (i, cost) in [0.5, 2.0, 1.0].iter().enumerate() {
+        nd.push_str(&format!(
+            "{{\"id\":{i},\"timestamp\":\"2026-06-20T08:00:00Z\",\"model\":\"m{i}\",\"status_code\":200,\"estimated_cost\":{{\"dollars\":{cost}}}}}\n"
+        ));
+    }
+    let f = Fixture::from_ndjson(&nd);
+    let out = f
+        .cmd()
+        .arg("stats")
+        .arg(&f.cbor_zstd)
+        .arg("--format")
+        .arg("csv")
+        .arg("--by")
+        .arg("model")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = s.lines().collect();
+    assert_eq!(
+        lines[0],
+        "model,count,input_tokens,output_tokens,cached_tokens,reasoning_tokens,cost_usd,duration_ms",
+        "csv header: {s}"
+    );
+    // Sorted by cost desc: m1 (2.0), m2 (1.0), m0 (0.5).
+    assert!(
+        lines[1].starts_with("m1,"),
+        "sorted desc row 1: {}",
+        lines[1]
+    );
+    assert!(
+        lines[2].starts_with("m2,"),
+        "sorted desc row 2: {}",
+        lines[2]
+    );
+    assert!(
+        lines[3].starts_with("m0,"),
+        "sorted desc row 3: {}",
+        lines[3]
     );
 }
 
@@ -4169,4 +4263,51 @@ fn failures_mermaid_clean_when_no_errors() {
         !s.contains("```mermaid"),
         "should emit nothing when clean: {s}"
     );
+}
+
+#[test]
+fn failures_csv_emits_tidy_status_model_count() {
+    let f = Fixture::from_ndjson(FAIL_NDJSON);
+    let out = f
+        .cmd()
+        .arg("failures")
+        .arg(&f.cbor_zstd)
+        .arg("--format")
+        .arg("csv")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = s.lines().collect();
+    assert_eq!(lines[0], "status,model,count", "csv header: {s}");
+    // FAIL_NDJSON: 503 (alpha/one ×3) and 429 (beta/two ×2).
+    assert!(s.contains("503,alpha/one,3"), "503 row missing: {s}");
+    assert!(s.contains("429,beta/two,2"), "429 row missing: {s}");
+    // Every data row has exactly 3 comma-separated fields (status, model, count).
+    for line in &lines[1..] {
+        // model has no comma in this fixture, so 2 commas = 3 fields.
+        assert_eq!(line.matches(',').count(), 2, "row not 3 fields: {line}");
+    }
+}
+
+#[test]
+fn failures_csv_clean_emits_header_only() {
+    let nd = "{\"id\":1,\"timestamp\":\"2026-06-20T08:00:00Z\",\"model\":\"alpha/one\",\"status_code\":200}\n";
+    let f = Fixture::from_ndjson(nd);
+    let out = f
+        .cmd()
+        .arg("failures")
+        .arg(&f.cbor_zstd)
+        .arg("--format")
+        .arg("csv")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = s.lines().collect();
+    assert_eq!(lines, vec!["status,model,count"], "header only: {s}");
 }

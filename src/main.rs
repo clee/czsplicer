@@ -1,5 +1,6 @@
 mod builtin;
 mod commands;
+mod csv;
 mod filter;
 mod format;
 mod mailbox;

@@ -1,4 +1,5 @@
 use crate::builtin;
+use crate::csv;
 use crate::filter::{Filter, FilterArgs};
 use crate::format::{self, RecordStream};
 use crate::mailbox;
@@ -258,14 +259,34 @@ pub struct LsArgs {
     pub filter: FilterArgs,
     #[arg(long)]
     pub json: bool,
+    /// Output format: "text" (default), "json", "csv".
+    #[arg(long, value_name = "FMT")]
+    pub format: Option<String>,
 }
 
 pub fn cmd_ls(args: &LsArgs) -> Result<()> {
     let filter = args.filter.build()?;
     let mut out = output_writer(None)?;
     let mut shown = 0u64;
+    let want_json = args.json || args.format.as_deref() == Some("json");
+    let want_csv = args.format.as_deref() == Some("csv");
 
-    if !args.json {
+    if want_csv {
+        write!(
+            out,
+            "{}",
+            csv::row(&[
+                "id",
+                "timestamp",
+                "model",
+                "path",
+                "status_code",
+                "input_tokens",
+                "output_tokens",
+                "cost_usd",
+            ])
+        )?;
+    } else if !want_json {
         writeln!(
             out,
             "{:>6}  {:<26} {:<28} {:<26} {:>6} {:>9} {:>9} {:>9}",
@@ -284,7 +305,7 @@ pub fn cmd_ls(args: &LsArgs) -> Result<()> {
         let out_tok = usage_int(&rec, "output_tokens");
         let cost = rec_cost(&rec);
 
-        if args.json {
+        if want_json {
             let row = serde_json::json!({
                 "id": id,
                 "timestamp": ts,
@@ -296,6 +317,21 @@ pub fn cmd_ls(args: &LsArgs) -> Result<()> {
                 "cost_usd": cost,
             });
             writeln!(out, "{}", serde_json::to_string(&row)?)?;
+        } else if want_csv {
+            write!(
+                out,
+                "{}",
+                csv::row(&[
+                    &id.to_string(),
+                    &ts,
+                    &model,
+                    &path,
+                    &status.to_string(),
+                    &in_tok.to_string(),
+                    &out_tok.to_string(),
+                    &format!("{:.6}", cost),
+                ])
+            )?;
         } else {
             let ts = format::clip_chars(&ts, 26).to_string();
             let model = format::clip_chars(&model, 28).to_string();
@@ -310,7 +346,8 @@ pub fn cmd_ls(args: &LsArgs) -> Result<()> {
         Ok(())
     })?;
 
-    if !args.json {
+    // Text view prints a count footer; json/csv are pure data streams.
+    if !want_json && !want_csv {
         eprintln!("{shown} record(s)");
     }
     Ok(())
@@ -576,7 +613,7 @@ pub struct StatsArgs {
     pub files: Vec<PathBuf>,
     #[arg(long)]
     pub json: bool,
-    /// Output format: "text" (default), "json", "mermaid".
+    /// Output format: "text" (default), "json", "mermaid", "csv".
     #[arg(long, value_name = "FMT")]
     pub format: Option<String>,
     /// Breakdown dimension: "model" (default), "provider", "path", or "status".
@@ -692,6 +729,10 @@ pub fn cmd_stats(args: &StatsArgs) -> Result<()> {
 
     if args.format.as_deref() == Some("mermaid") {
         return stats_mermaid(dim, &by_model, &by_provider, &by_path, &by_status, &by_day);
+    }
+
+    if args.format.as_deref() == Some("csv") {
+        return stats_csv(dim, &by_model, &by_provider, &by_path, &by_status);
     }
 
     println!("=== czsplicer stats ===");
@@ -825,6 +866,55 @@ fn stats_mermaid(
     Ok(())
 }
 
+/// Emit the selected dimension's buckets as CSV (one row per key, sorted by
+/// cost descending to match the text view). Columns mirror `buckets_json`.
+fn stats_csv(
+    dim: StatsDim,
+    by_model: &BTreeMap<String, Bucket>,
+    by_provider: &BTreeMap<String, Bucket>,
+    by_path: &BTreeMap<String, Bucket>,
+    by_status: &BTreeMap<String, Bucket>,
+) -> Result<()> {
+    let (buckets, label): (&BTreeMap<String, Bucket>, &str) = match dim {
+        StatsDim::Model => (by_model, "model"),
+        StatsDim::Provider => (by_provider, "provider"),
+        StatsDim::Path => (by_path, "path"),
+        StatsDim::Status => (by_status, "status"),
+    };
+    let mut rows: Vec<(&String, &Bucket)> = buckets.iter().collect();
+    rows.sort_by(|a, b| {
+        b.1.cost
+            .partial_cmp(&a.1.cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut out = String::new();
+    out.push_str(&csv::row(&[
+        label,
+        "count",
+        "input_tokens",
+        "output_tokens",
+        "cached_tokens",
+        "reasoning_tokens",
+        "cost_usd",
+        "duration_ms",
+    ]));
+    for (k, b) in &rows {
+        out.push_str(&csv::row(&[
+            k.as_str(),
+            &b.count.to_string(),
+            &b.input_tokens.to_string(),
+            &b.output_tokens.to_string(),
+            &b.cached_tokens.to_string(),
+            &b.reasoning_tokens.to_string(),
+            &format!("{:.6}", b.cost),
+            &b.duration_ms.to_string(),
+        ]));
+    }
+    print!("{out}");
+    Ok(())
+}
+
 fn human_dur(ms: i64) -> String {
     let s = ms / 1000;
     if s >= 3600 {
@@ -846,7 +936,7 @@ pub struct FailuresArgs {
     pub files: Vec<PathBuf>,
     #[arg(long)]
     pub json: bool,
-    /// Output format: "text" (default), "json", "mermaid".
+    /// Output format: "text" (default), "json", "mermaid", "csv".
     #[arg(long, value_name = "FMT")]
     pub format: Option<String>,
     /// Include 2xx successes in the histogram (baseline contrast).
@@ -938,12 +1028,20 @@ pub fn cmd_failures(args: &FailuresArgs) -> Result<()> {
         if args.format.as_deref() == Some("mermaid") {
             return Ok(());
         }
+        if args.format.as_deref() == Some("csv") {
+            // Header-only: still a valid (empty) CSV for downstream tools.
+            print!("{}", csv::row(&["status", "model", "count"]));
+            return Ok(());
+        }
         eprintln!("no failures found ({total_scanned} records scanned)");
         return Ok(());
     }
 
     if args.format.as_deref() == Some("mermaid") {
         return failures_mermaid(&buckets, total_scanned, total_shown);
+    }
+    if args.format.as_deref() == Some("csv") {
+        return failures_csv(&buckets);
     }
 
     let pct = if total_scanned > 0 {
@@ -1093,6 +1191,27 @@ fn failures_mermaid(
         }
     }
     print!("{}", mermaid::timeline("Failure peak hours", &groups));
+    Ok(())
+}
+
+/// Emit failures as a tidy/long CSV: one row per (status, model) pair with
+/// count. This is the pivot-friendly shape for spreadsheet analysis (a user
+/// can pivot to status×model matrices). Sorted by status then count desc.
+fn failures_csv(buckets: &BTreeMap<i64, FailBucket>) -> Result<()> {
+    let mut out = String::new();
+    out.push_str(&csv::row(&["status", "model", "count"]));
+    for (status, b) in buckets {
+        let mut models: Vec<(&String, &u64)> = b.by_model.iter().collect();
+        models.sort_by(|a, x| x.1.cmp(a.1));
+        for (model, &cnt) in &models {
+            out.push_str(&csv::row(&[
+                &status.to_string(),
+                model.as_str(),
+                &cnt.to_string(),
+            ]));
+        }
+    }
+    print!("{out}");
     Ok(())
 }
 
