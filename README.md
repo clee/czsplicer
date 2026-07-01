@@ -40,6 +40,7 @@ Commands:
   merge    Merge many `.cbor.zstd` files into one (CBOR -> CBOR, streaming)
   split    Split one stream into per-group `.cbor.zstd` files (by day/session/model/path)
   stats    Aggregate stats: tokens, cost, durations, by-model / by-path
+  report   Compose a single Markdown report: summary + usage/failure charts + conversations
   thread   Reconstruct conversation threads (branching included); export as JSON/HTML/MBOX/Maildir
   failures  Error/failure analysis: sparkline histogram by hour-of-day, status×model breakdown
 ```
@@ -196,6 +197,26 @@ czsplicer verify prod/          # ok / FAIL per file, exits 1 on corruption
 czsplicer verify prod/ --json
 ```
 
+### Report (one-file overview)
+
+Compose a single self-contained Markdown document — summary, usage charts
+(Mermaid), failure analysis, and the full readable conversations. On a large
+corpus the conversations can make this tens of megabytes — past a GitHub
+issue's 65,536-character cap. Pass `--no-conversations` for a compact summary
+that fits in an issue, or write it to a file (`-o`) and attach that instead.
+
+```sh
+# One pass: stats + failures + threads -> report.md (Mermaid renders on GitHub)
+czsplicer report prod/ -o report.md
+
+# Redact secrets first (same presets as `edit`); the secrets-safety net warns
+# otherwise.
+czsplicer report prod/ --redact-preset all -o report.md
+
+# Compact summary (omit conversations) — fits in a GitHub issue.
+czsplicer report prod/ --no-conversations -o summary.md
+```
+
 ## Filtering
 
 Every selection command (`ls`, `extract`, `grep`, `edit`, `stats`, `merge`,
@@ -237,7 +258,7 @@ Directory arguments are expanded to their sorted `*.cbor.zstd` contents, so
 ## Development
 
 ```sh
-cargo test                       # 189 passed, 1 ignored (2 suites; unit tests in mailbox/mermaid/csv/secrets)
+cargo test                       # 193 passed, 1 ignored (2 suites; unit tests in mailbox/mermaid/csv/secrets)
 ```
 
 The repository includes a pre-commit hook (`hooks/pre-commit`) that runs

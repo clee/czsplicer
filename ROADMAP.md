@@ -185,13 +185,18 @@ Each piece is individually useful and unblocks Phase 3.
 5. ✅ **Secrets-safety net** — detector on HTML/Markdown output paths
    (see "Secrets-safety net (shipped)" above).
 
-### Phase 3 — the centerpiece
+### Phase 3 — the centerpiece — COMPLETE
 
-6. **`report` command** — composes summary + stats-mermaid + failures-mermaid +
-   per-thread flattened prose into one `.md`. This is the OSS-launch headline
-   artifact.
-7. **HTML report (stretch)** — same composition, rendered: vendored mermaid.js +
-   existing builtin thread HTML. Opt-in, not the default.
+6. ✅ **`report` command** — composes summary + stats-mermaid (cost by model +
+   daily xychart) + failures-mermaid (pie + timeline, omitted when clean) +
+   per-thread prose into one `.md`. Single streaming pass accumulates stats +
+   failures + the thread forest. Reuses StatsAccum/FailuresAccum (extracted
+   from cmd_stats/cmd_failures during this work) and the shared mermaid /
+   markdown_render emitters. Carries the same redact + secrets-safety-net
+   flags as `thread`.
+7. **HTML report (stretch, deferred)** — same composition, rendered with
+   vendored mermaid.js + existing builtin thread HTML. Opt-in, not the
+   default. Slips to Phase 4 alongside the interactive viewer.
 
 ### Phase 4 — the weird/novel formats (post-launch)
 

@@ -2637,6 +2637,21 @@ fn rec(id: i64, body: &str) -> String {
     .to_string()
 }
 
+/// A record with a one-turn conversation body, a model, status, and a cost —
+/// the shape `report`/`stats` need (conversation + numeric metadata).
+fn rec_with_cost(id: i64, model: &str, status: i64, cost: f64) -> String {
+    let body = body_with_messages("S", &[("user", "hello")]);
+    serde_json::json!({
+        "id":id,
+        "model":model,
+        "path":"/v1/messages",
+        "status_code":status,
+        "estimated_cost":{"dollars":cost},
+        "capture":{"requestBody":body}
+    })
+    .to_string()
+}
+
 #[test]
 fn thread_linear_chain_is_single_path() {
     // Three records, each extending the same conversation: a single tree,
@@ -3330,6 +3345,129 @@ fn thread_md_writes_to_file_with_minus_o() {
     assert!(
         written.contains("# Conversation threads"),
         "file output: {written}"
+    );
+}
+
+// ===========================================================================
+// report (single-pass composed Markdown)
+// ===========================================================================
+
+#[test]
+fn report_emits_summary_usage_and_conversations() {
+    // 2 records: one success with cost, one failure. One conversation thread.
+    let nd = format!(
+        "{}\n{}\n",
+        rec_with_cost(1, "alpha/one", 200, 0.5),
+        rec_with_cost(2, "alpha/one", 503, 0.0),
+    );
+    let f = Fixture::from_ndjson(&nd);
+    let out = f
+        .cmd()
+        .arg("report")
+        .arg(&f.cbor_zstd)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).unwrap();
+    assert!(s.starts_with("# czsplicer report"), "missing title: {s}");
+    assert!(s.contains("## Summary"), "missing summary: {s}");
+    assert!(s.contains("**records:** 2"), "missing record count: {s}");
+    assert!(s.contains("## Usage"), "missing usage section: {s}");
+    assert!(s.contains("Cost by model"), "missing model pie: {s}");
+    assert!(s.contains("## Failures"), "missing failures section: {s}");
+    assert!(s.contains("## Conversations"), "missing conversations: {s}");
+}
+
+#[test]
+fn report_no_conversations_omits_section() {
+    let nd = format!(
+        "{}\n{}\n",
+        rec_with_cost(1, "alpha/one", 200, 0.5),
+        rec_with_cost(2, "alpha/one", 503, 0.0),
+    );
+    let f = Fixture::from_ndjson(&nd);
+    let out = f
+        .cmd()
+        .arg("report")
+        .arg(&f.cbor_zstd)
+        .arg("--no-conversations")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).unwrap();
+    assert!(s.contains("## Summary"), "summary should remain: {s}");
+    assert!(
+        !s.contains("## Conversations"),
+        "conversations should be omitted: {s}"
+    );
+}
+
+#[test]
+fn report_failures_section_omitted_when_clean() {
+    // All 2xx → no failures section.
+    let nd = format!("{}\n", rec_with_cost(1, "alpha/one", 200, 1.0));
+    let f = Fixture::from_ndjson(&nd);
+    let out = f
+        .cmd()
+        .arg("report")
+        .arg(&f.cbor_zstd)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).unwrap();
+    assert!(
+        !s.contains("## Failures"),
+        "clean report should omit failures: {s}"
+    );
+}
+
+#[test]
+fn report_secrets_warning_fires() {
+    let f = Fixture::from_ndjson(SECRET_NDJSON);
+    let out = f
+        .cmd()
+        .arg("report")
+        .arg(&f.cbor_zstd)
+        .arg("-o")
+        .arg(f.dir.join("r.md"))
+        .assert()
+        .success()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(out).unwrap();
+    assert!(
+        stderr.contains("un-redacted secrets"),
+        "report should warn on secrets: {stderr}"
+    );
+}
+
+#[test]
+fn report_redact_suppresses_secrets_warning() {
+    let f = Fixture::from_ndjson(SECRET_NDJSON);
+    let out = f
+        .cmd()
+        .arg("report")
+        .arg(&f.cbor_zstd)
+        .arg("--redact-preset")
+        .arg("apikey")
+        .arg("-o")
+        .arg(f.dir.join("r.md"))
+        .assert()
+        .success()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(out).unwrap();
+    assert!(
+        !stderr.contains("un-redacted secrets"),
+        "redacted report should not warn: {stderr}"
     );
 }
 

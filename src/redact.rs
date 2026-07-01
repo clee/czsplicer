@@ -12,6 +12,69 @@
 //! invoke `compile_redact_regexes` explicitly.
 
 use anyhow::{anyhow, Result};
+use regex::Regex;
+use std::borrow::Cow;
+
+/// Clap-shared redaction flags. Flattened into `EditArgs`, `ReportArgs`, and
+/// `ThreadArgs` so the three commands stay in sync. `--all-strings` (edit) and
+/// `--i-know` (report/thread) stay on their own structs — they are not shared.
+#[derive(clap::Args, Default)]
+pub struct RedactArgs {
+    /// Regex to redact from string bodies; matches replaced with the replacement.
+    /// Repeatable.
+    #[arg(long, value_name = "REGEX")]
+    pub redact: Vec<String>,
+    /// Redact using a named preset: email, jwt, apikey, bearer, aws, ipv4,
+    /// uuid, creditcard, ssn, or all. Repeatable. Combines with --redact.
+    #[arg(long = "redact-preset", value_name = "PRESET")]
+    pub redact_presets: Vec<String>,
+    /// Replacement text for redacted matches (default "[REDACTED]").
+    #[arg(long, value_name = "TOKEN", default_value = "[REDACTED]")]
+    pub redact_replacement: String,
+}
+
+impl RedactArgs {
+    /// Compile into a `Redactor`. Empty when no `--redact`/`--redact-preset`
+    /// was given (callers check `is_active()` before scrubbing).
+    pub fn build(&self) -> Result<Redactor> {
+        Redactor::new(&self.redact, &self.redact_presets, &self.redact_replacement)
+    }
+}
+
+/// Compiled redaction set: regexes + replacement. The closure body that was
+/// duplicated across `cmd_edit`/`cmd_report`/`cmd_thread` lives here once.
+pub struct Redactor {
+    regexes: Vec<Regex>,
+    replacement: String,
+}
+
+impl Redactor {
+    pub fn new(redact: &[String], presets: &[String], replacement: &str) -> Result<Self> {
+        Ok(Self {
+            regexes: compile_redact_regexes(redact, presets)?,
+            replacement: replacement.to_string(),
+        })
+    }
+
+    /// True when at least one regex was compiled (i.e. redaction will fire).
+    pub fn is_active(&self) -> bool {
+        !self.regexes.is_empty()
+    }
+
+    /// Apply every regex in order, replacing matches with the replacement.
+    /// Only allocates when a regex actually matches: `is_match` guards each
+    /// regex so a no-match never copies the string (it flows through as a
+    /// borrowed `Cow` instead of being copied once per regex).
+    pub fn apply(&self, s: &str) -> String {
+        let mut cur: Cow<str> = Cow::Borrowed(s);
+        for r in &self.regexes {
+            if r.is_match(&cur) {
+                cur = Cow::Owned(r.replace_all(&cur, self.replacement.as_str()).into_owned());
+            }
+        }
+        cur.into_owned()
+    }
+}
 
 /// Named canned regex patterns: `(name, regex, human description)`.
 pub const REDACT_PRESETS: &[(&str, &str, &str)] = &[
@@ -91,4 +154,37 @@ pub fn compile_redact_regexes(redact: &[String], presets: &[String]) -> Result<V
         .map(|p| regex::Regex::new(p))
         .collect::<Result<_, _>>()
         .map_err(|e| anyhow!("invalid redact regex: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_no_match_returns_input_unchanged() {
+        // No regex matches: the input must pass through byte-for-byte without
+        // the per-regex copy the old `to_string()`-on-every-iteration did.
+        let r = Redactor::new(&["zzzznomatch".into()], &[], "[REDACTED]").unwrap();
+        let s = "nothing to see here, move along";
+        assert_eq!(r.apply(s), s);
+    }
+
+    #[test]
+    fn apply_replaces_matches_and_leaves_rest() {
+        let r = Redactor::new(&[r"sk-[A-Za-z0-9]{4}".into()], &[], "[REDACTED]").unwrap();
+        assert_eq!(r.apply("key sk-abcd here"), "key [REDACTED] here");
+        // A string the regex doesn't match is returned verbatim.
+        assert_eq!(r.apply("no keys at all"), "no keys at all");
+    }
+
+    #[test]
+    fn apply_chains_multiple_regexes() {
+        let r = Redactor::new(
+            &[r"sk-[A-Za-z0-9]{4}".into(), r"AKIA[0-9A-Z]{4}".into()],
+            &[],
+            "[X]",
+        )
+        .unwrap();
+        assert_eq!(r.apply("sk-abcd and AKIA1234"), "[X] and [X]");
+    }
 }

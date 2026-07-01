@@ -73,6 +73,8 @@ enum Cmd {
     Failures(FailuresArgs),
     /// Aggregate stats: tokens, cost, durations, by-model / by-path.
     Stats(StatsArgs),
+    /// Compose a single self-contained Markdown report (summary + usage charts + failures + conversations).
+    Report(ReportArgs),
 }
 
 fn main() -> Result<()> {
@@ -122,6 +124,10 @@ fn main() -> Result<()> {
         Cmd::Failures(mut a) => {
             a.files = expand(a.files)?;
             cmd_failures(&a)
+        }
+        Cmd::Report(mut a) => {
+            a.files = expand(a.files)?;
+            cmd_report(&a)
         }
     }
 }

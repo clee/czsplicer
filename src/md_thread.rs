@@ -17,7 +17,15 @@ pub fn render_md(forest: &Json) -> String {
     out.push_str("# Conversation threads\n\n");
     out.push_str(&summary_block(forest));
     out.push('\n');
+    out.push_str(&render_conversations(forest));
+    out
+}
 
+/// Render just the per-conversation sections (no top-level title/summary).
+/// Used by `report` to embed conversations under its own `## Conversations`
+/// heading without duplicating the document title.
+pub fn render_conversations(forest: &Json) -> String {
+    let mut out = String::new();
     let records = forest.get("records").and_then(|r| r.as_object());
     let paths = all_paths(forest);
 

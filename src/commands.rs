@@ -515,20 +515,11 @@ pub struct EditArgs {
     /// Null out a dotted field path (e.g. capture.requestBody). Repeatable.
     #[arg(long, value_name = "PATH")]
     pub strip: Vec<String>,
-    /// Regex to redact from string bodies; matches replaced with the replacement.
-    /// Repeatable. Applies to capture.* by default, or whole record with --all-strings.
-    #[arg(long, value_name = "REGEX")]
-    pub redact: Vec<String>,
-    /// Redact using a named preset: email, jwt, apikey, bearer, aws, ipv4,
-    /// uuid, creditcard, ssn, or all. Repeatable. Combines with --redact.
-    #[arg(long = "redact-preset", value_name = "PRESET")]
-    pub redact_presets: Vec<String>,
     /// Apply redact regexes to every string in the record, not just capture bodies.
     #[arg(long)]
     pub all_strings: bool,
-    /// Replacement text for redacted matches (default "[REDACTED]").
-    #[arg(long, default_value = "[REDACTED]")]
-    pub redact_replacement: String,
+    #[command(flatten)]
+    pub redact: redact::RedactArgs,
     /// Emit NDJSON instead of a .cbor.zstd file (output "-" for stdout).
     #[arg(long)]
     pub json: bool,
@@ -539,8 +530,7 @@ pub struct EditArgs {
 pub fn cmd_edit(args: &EditArgs) -> Result<()> {
     let filter = args.filter.build()?;
 
-    // Merge explicit redact patterns with expanded presets.
-    let regexes = compile_redact_regexes(&args.redact, &args.redact_presets)?;
+    let redactor = args.redact.build()?;
 
     if args.json && args.output.to_string_lossy() != "-" {
         // writing JSON NDJSON; ensure parent dir exists
@@ -555,7 +545,7 @@ pub fn cmd_edit(args: &EditArgs) -> Result<()> {
     if args.json {
         let mut out = output_writer(Some(args.output.as_path()))?;
         dropped = for_each_matching_record(&args.files, &filter, |mut rec| {
-            transform(&mut rec, args, &regexes);
+            transform(&mut rec, args, &redactor);
             serde_json::to_writer(&mut out, &format::cbor_to_json(&rec))?;
             writeln!(out)?;
             kept += 1;
@@ -565,7 +555,7 @@ pub fn cmd_edit(args: &EditArgs) -> Result<()> {
     } else {
         let mut packer = format::ZstdPacker::create(&args.output, args.level)?;
         dropped = for_each_matching_record(&args.files, &filter, |mut rec| {
-            transform(&mut rec, args, &regexes);
+            transform(&mut rec, args, &redactor);
             packer.write_record(&rec)?;
             kept += 1;
             Ok(())
@@ -579,7 +569,7 @@ pub fn cmd_edit(args: &EditArgs) -> Result<()> {
     Ok(())
 }
 
-fn transform(rec: &mut ciborium::Value, args: &EditArgs, regexes: &[regex::Regex]) {
+fn transform(rec: &mut ciborium::Value, args: &EditArgs, redactor: &Redactor) {
     if args.strip_headers {
         format::path_null(rec, "capture.requestHeaders");
         format::path_null(rec, "capture.responseHeaders");
@@ -587,19 +577,11 @@ fn transform(rec: &mut ciborium::Value, args: &EditArgs, regexes: &[regex::Regex
     for p in &args.strip {
         format::path_null(rec, p);
     }
-    if !regexes.is_empty() {
-        let repl = args.redact_replacement.clone();
-        let sub = |s: &str| -> String {
-            let mut cur = s.to_string();
-            for r in regexes {
-                cur = r.replace_all(&cur, repl.as_str()).to_string();
-            }
-            cur
-        };
+    if redactor.is_active() {
         if args.all_strings {
-            format::redact_strings(rec, &sub);
+            format::redact_strings(rec, &|s| redactor.apply(s));
         } else if let Some(cap) = format::field_mut(rec, "capture") {
-            format::redact_strings(cap, &sub);
+            format::redact_strings(cap, &|s| redactor.apply(s));
         }
     }
 }
@@ -658,114 +640,74 @@ struct Bucket {
 pub fn cmd_stats(args: &StatsArgs) -> Result<()> {
     let filter = args.filter.build()?;
     let dim = parse_stats_dim(args.by.as_deref())?;
-    let mut total = Bucket::default();
-    let mut by_model: BTreeMap<String, Bucket> = Default::default();
-    let mut by_provider: BTreeMap<String, Bucket> = Default::default();
-    let mut by_path: BTreeMap<String, Bucket> = Default::default();
-    let mut by_status: BTreeMap<String, Bucket> = Default::default();
-    let mut by_day: BTreeMap<String, f64> = Default::default();
-    let mut min_ts: Option<String> = None;
-    let mut max_ts: Option<String> = None;
+    let mut stats = StatsAccum::new();
 
     for_each_matching_record(&args.files, &filter, |rec| {
-        let model = format::rec_str(&rec, "model").unwrap_or_else(|| "-".into());
-        let provider = model
-            .split_once('/')
-            .map(|(p, _)| p.to_string())
-            .unwrap_or_else(|| "-".into());
-        let path = format::rec_str(&rec, "path").unwrap_or_else(|| "-".into());
-        let status = format::rec_int(&rec, "status_code")
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "-".into());
-        let b = Bucket {
-            count: 1,
-            input_tokens: usage_int(&rec, "input_tokens"),
-            output_tokens: usage_int(&rec, "output_tokens"),
-            cached_tokens: usage_int(&rec, "cached_tokens"),
-            reasoning_tokens: usage_int(&rec, "reasoning_tokens"),
-            cost: rec_cost(&rec),
-            duration_ms: format::rec_int(&rec, "duration_ms").unwrap_or(0),
-        };
-        accumulate(&mut total, &b);
-        accumulate(by_model.entry(model).or_default(), &b);
-        accumulate(by_provider.entry(provider).or_default(), &b);
-        accumulate(by_path.entry(path).or_default(), &b);
-        accumulate(by_status.entry(status).or_default(), &b);
-        if let Some(ts) = format::rec_str(&rec, "timestamp") {
-            if let Some(day) = ts.get(..10) {
-                *by_day.entry(day.to_string()).or_insert(0.0) += b.cost;
-            }
-            if min_ts.as_ref().map_or(true, |m| m > &ts) {
-                min_ts = Some(ts.clone());
-            }
-            if max_ts.as_ref().map_or(true, |m| m < &ts) {
-                max_ts = Some(ts);
-            }
-        }
+        stats.add(&rec);
         Ok(())
     })?;
 
     let want_json = args.json || args.format.as_deref() == Some("json");
     if want_json {
         let j = serde_json::json!({
-            "records": total.count,
-            "input_tokens": total.input_tokens,
-            "output_tokens": total.output_tokens,
-            "cached_tokens": total.cached_tokens,
-            "reasoning_tokens": total.reasoning_tokens,
-            "total_tokens": total.input_tokens + total.output_tokens + total.reasoning_tokens,
-            "cost_usd": total.cost,
-            "duration_ms_total": total.duration_ms,
-            "duration_avg_ms": if total.count > 0 { total.duration_ms as f64 / total.count as f64 } else { 0.0 },
-            "first_timestamp": min_ts,
-            "last_timestamp": max_ts,
-            "by_model": buckets_json(&by_model),
-            "by_provider": buckets_json(&by_provider),
-            "by_path": buckets_json(&by_path),
-            "by_status": buckets_json(&by_status),
+            "records": stats.total.count,
+            "input_tokens": stats.total.input_tokens,
+            "output_tokens": stats.total.output_tokens,
+            "cached_tokens": stats.total.cached_tokens,
+            "reasoning_tokens": stats.total.reasoning_tokens,
+            "total_tokens": stats.total.input_tokens + stats.total.output_tokens + stats.total.reasoning_tokens,
+            "cost_usd": stats.total.cost,
+            "duration_ms_total": stats.total.duration_ms,
+            "duration_avg_ms": if stats.total.count > 0 { stats.total.duration_ms as f64 / stats.total.count as f64 } else { 0.0 },
+            "first_timestamp": stats.min_ts.clone(),
+            "last_timestamp": stats.max_ts.clone(),
+            "by_model": buckets_json(&stats.by_model),
+            "by_provider": buckets_json(&stats.by_provider),
+            "by_path": buckets_json(&stats.by_path),
+            "by_status": buckets_json(&stats.by_status),
         });
         println!("{}", serde_json::to_string_pretty(&j)?);
         return Ok(());
     }
 
     if args.format.as_deref() == Some("mermaid") {
-        return stats_mermaid(dim, &by_model, &by_provider, &by_path, &by_status, &by_day);
+        print!("{}", stats_mermaid(dim, &stats));
+        return Ok(());
     }
 
     if args.format.as_deref() == Some("csv") {
-        return stats_csv(dim, &by_model, &by_provider, &by_path, &by_status);
+        stats_csv(dim, &stats)?;
+        return Ok(());
     }
 
     println!("=== czsplicer stats ===");
-    println!("records:              {}", total.count);
+    println!("records:              {}", stats.total.count);
     println!(
         "time span:            {} .. {}",
-        min_ts.as_deref().unwrap_or("-"),
-        max_ts.as_deref().unwrap_or("-")
+        stats.min_ts.as_deref().unwrap_or("-"),
+        stats.max_ts.as_deref().unwrap_or("-")
     );
-    println!("tokens (input):       {}", total.input_tokens);
-    println!("tokens (output):      {}", total.output_tokens);
-    println!("tokens (cached):      {}", total.cached_tokens);
-    println!("tokens (reasoning):   {}", total.reasoning_tokens);
+    println!("tokens (input):       {}", stats.total.input_tokens);
+    println!("tokens (output):      {}", stats.total.output_tokens);
+    println!("tokens (cached):      {}", stats.total.cached_tokens);
+    println!("tokens (reasoning):   {}", stats.total.reasoning_tokens);
     println!(
         "tokens (total):       {}",
-        total.input_tokens + total.output_tokens + total.reasoning_tokens
+        stats.total.input_tokens + stats.total.output_tokens + stats.total.reasoning_tokens
     );
-    println!("estimated cost:       ${:.4}", total.cost);
-    println!("duration total:       {}", human_dur(total.duration_ms));
-    if total.count > 0 {
+    println!("estimated cost:       ${:.4}", stats.total.cost);
+    println!(
+        "duration total:       {}",
+        human_dur(stats.total.duration_ms)
+    );
+    if stats.total.count > 0 {
         println!(
             "duration avg:         {}",
-            human_dur(total.duration_ms / total.count as i64)
+            human_dur(stats.total.duration_ms / stats.total.count as i64)
         );
     }
 
-    let (buckets, label): (&BTreeMap<String, Bucket>, &str) = match dim {
-        StatsDim::Model => (&by_model, "model"),
-        StatsDim::Provider => (&by_provider, "provider"),
-        StatsDim::Path => (&by_path, "path"),
-        StatsDim::Status => (&by_status, "status"),
-    };
+    let (buckets, label) = stats.dim_buckets(dim);
     println!("\n=== by {label} ===");
     println!(
         "{:<34} {:>7} {:>9} {:>9} {:>9} {:>9}",
@@ -798,6 +740,72 @@ fn accumulate(dst: &mut Bucket, src: &Bucket) {
     dst.duration_ms += src.duration_ms;
 }
 
+/// Streaming accumulator for `stats`/`report`. One `add()` per record.
+#[derive(Default)]
+struct StatsAccum {
+    total: Bucket,
+    by_model: BTreeMap<String, Bucket>,
+    by_provider: BTreeMap<String, Bucket>,
+    by_path: BTreeMap<String, Bucket>,
+    by_status: BTreeMap<String, Bucket>,
+    by_day: BTreeMap<String, f64>,
+    min_ts: Option<String>,
+    max_ts: Option<String>,
+}
+
+impl StatsAccum {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn add(&mut self, rec: &ciborium::Value) {
+        let model = format::rec_str(rec, "model").unwrap_or_else(|| "-".into());
+        let provider = model
+            .split_once('/')
+            .map(|(p, _)| p.to_string())
+            .unwrap_or_else(|| "-".into());
+        let path = format::rec_str(rec, "path").unwrap_or_else(|| "-".into());
+        let status = format::rec_int(rec, "status_code")
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "-".into());
+        let b = Bucket {
+            count: 1,
+            input_tokens: usage_int(rec, "input_tokens"),
+            output_tokens: usage_int(rec, "output_tokens"),
+            cached_tokens: usage_int(rec, "cached_tokens"),
+            reasoning_tokens: usage_int(rec, "reasoning_tokens"),
+            cost: rec_cost(rec),
+            duration_ms: format::rec_int(rec, "duration_ms").unwrap_or(0),
+        };
+        accumulate(&mut self.total, &b);
+        accumulate(self.by_model.entry(model).or_default(), &b);
+        accumulate(self.by_provider.entry(provider).or_default(), &b);
+        accumulate(self.by_path.entry(path).or_default(), &b);
+        accumulate(self.by_status.entry(status).or_default(), &b);
+        if let Some(ts) = format::rec_str(rec, "timestamp") {
+            if let Some(day) = ts.get(..10) {
+                *self.by_day.entry(day.to_string()).or_insert(0.0) += b.cost;
+            }
+            if self.min_ts.as_ref().map_or(true, |m| m > &ts) {
+                self.min_ts = Some(ts.clone());
+            }
+            if self.max_ts.as_ref().map_or(true, |m| m < &ts) {
+                self.max_ts = Some(ts);
+            }
+        }
+    }
+
+    /// Select the bucket map + label for a dimension.
+    fn dim_buckets(&self, dim: StatsDim) -> (&BTreeMap<String, Bucket>, &'static str) {
+        match dim {
+            StatsDim::Model => (&self.by_model, "model"),
+            StatsDim::Provider => (&self.by_provider, "provider"),
+            StatsDim::Path => (&self.by_path, "path"),
+            StatsDim::Status => (&self.by_status, "status"),
+        }
+    }
+}
+
 fn buckets_json(m: &BTreeMap<String, Bucket>) -> serde_json::Value {
     let mut arr = Vec::new();
     for (k, b) in m {
@@ -820,20 +828,14 @@ fn buckets_json(m: &BTreeMap<String, Bucket>) -> serde_json::Value {
 const MERMAID_TOP_N: usize = 8;
 
 /// Emit stats as Mermaid diagrams: a pie for the selected dimension (top-N
-/// collapsed for model/provider) and an xychart of daily cost.
-fn stats_mermaid(
-    dim: StatsDim,
-    by_model: &BTreeMap<String, Bucket>,
-    by_provider: &BTreeMap<String, Bucket>,
-    by_path: &BTreeMap<String, Bucket>,
-    by_status: &BTreeMap<String, Bucket>,
-    by_day: &BTreeMap<String, f64>,
-) -> Result<()> {
-    let (buckets, label, collapse): (&BTreeMap<String, Bucket>, &str, bool) = match dim {
-        StatsDim::Model => (by_model, "model", true),
-        StatsDim::Provider => (by_provider, "provider", true),
-        StatsDim::Path => (by_path, "path", false),
-        StatsDim::Status => (by_status, "status", false),
+/// collapsed for model/provider) and an xychart of daily cost. Returns the
+/// diagram text (callers print or compose into a report).
+fn stats_mermaid(dim: StatsDim, stats: &StatsAccum) -> String {
+    let (buckets, label, collapse) = match dim {
+        StatsDim::Model => (&stats.by_model, "model", true),
+        StatsDim::Provider => (&stats.by_provider, "provider", true),
+        StatsDim::Path => (&stats.by_path, "path", false),
+        StatsDim::Status => (&stats.by_status, "status", false),
     };
 
     let mut rows: Vec<(String, f64)> = buckets.iter().map(|(k, b)| (k.clone(), b.cost)).collect();
@@ -849,39 +851,26 @@ fn stats_mermaid(
             value: *v,
         })
         .collect();
-    print!("{}", mermaid::pie(&format!("Cost by {label}"), &slices));
+    let mut out = mermaid::pie(&format!("Cost by {label}"), &slices);
 
-    if !by_day.is_empty() {
-        let pts: Vec<mermaid::Point> = by_day
+    if !stats.by_day.is_empty() {
+        let pts: Vec<mermaid::Point> = stats
+            .by_day
             .iter()
             .map(|(day, c)| mermaid::Point {
                 x: day.clone(),
                 y: *c,
             })
             .collect();
-        print!(
-            "{}",
-            mermaid::xychart("Cost by day (USD)", &pts, "day", "$")
-        );
+        out.push_str(&mermaid::xychart("Cost by day (USD)", &pts, "day", "$"));
     }
-    Ok(())
+    out
 }
 
 /// Emit the selected dimension's buckets as CSV (one row per key, sorted by
 /// cost descending to match the text view). Columns mirror `buckets_json`.
-fn stats_csv(
-    dim: StatsDim,
-    by_model: &BTreeMap<String, Bucket>,
-    by_provider: &BTreeMap<String, Bucket>,
-    by_path: &BTreeMap<String, Bucket>,
-    by_status: &BTreeMap<String, Bucket>,
-) -> Result<()> {
-    let (buckets, label): (&BTreeMap<String, Bucket>, &str) = match dim {
-        StatsDim::Model => (by_model, "model"),
-        StatsDim::Provider => (by_provider, "provider"),
-        StatsDim::Path => (by_path, "path"),
-        StatsDim::Status => (by_status, "status"),
-    };
+fn stats_csv(dim: StatsDim, stats: &StatsAccum) -> Result<()> {
+    let (buckets, label) = stats.dim_buckets(dim);
     let mut rows: Vec<(&String, &Bucket)> = buckets.iter().collect();
     rows.sort_by(|a, b| {
         b.1.cost
@@ -954,6 +943,44 @@ struct FailBucket {
     total: u64,
 }
 
+/// Streaming accumulator for `failures`/`report`. One `add()` per record.
+#[derive(Default)]
+struct FailuresAccum {
+    buckets: BTreeMap<i64, FailBucket>,
+    total_scanned: u64,
+}
+
+impl FailuresAccum {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Tally a record. When `include_2xx` is false, 2xx successes are counted
+    /// toward `total_scanned` but skipped for the failure histogram.
+    fn add(&mut self, rec: &ciborium::Value, include_2xx: bool) {
+        self.total_scanned += 1;
+        let status = format::rec_int(rec, "status_code").unwrap_or(0);
+        if !include_2xx && (200..300).contains(&status) {
+            return;
+        }
+        let ts = format::rec_str(rec, "timestamp").unwrap_or_default();
+        let hour = ts
+            .get(11..13)
+            .and_then(|h| h.parse::<usize>().ok())
+            .unwrap_or(0)
+            .min(23);
+        let model = format::rec_str(rec, "model").unwrap_or_default();
+        let b = self.buckets.entry(status).or_default();
+        b.by_hour[hour] += 1;
+        b.total += 1;
+        *b.by_model.entry(model).or_insert(0) += 1;
+    }
+
+    fn total_shown(&self) -> u64 {
+        self.buckets.values().map(|b| b.total).sum()
+    }
+}
+
 /// Inline sparkline characters for 8 levels (low → high).
 const SPARK: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
@@ -994,38 +1021,22 @@ fn peak_hours(hours: &[u64; 24], top: usize) -> String {
 
 pub fn cmd_failures(args: &FailuresArgs) -> Result<()> {
     let filter = args.filter.build()?;
-    let mut buckets: BTreeMap<i64, FailBucket> = BTreeMap::new();
-    let mut total_scanned = 0u64;
+    let mut fail = FailuresAccum::new();
 
     for_each_matching_record(&args.files, &filter, |rec| {
-        total_scanned += 1;
-        let status = format::rec_int(&rec, "status_code").unwrap_or(0);
-        // Default: only collect non-2xx. --all disables this.
-        if !args.all && (200..300).contains(&status) {
-            return Ok(());
-        }
-        let ts = format::rec_str(&rec, "timestamp").unwrap_or_default();
-        let hour = ts
-            .get(11..13)
-            .and_then(|h| h.parse::<usize>().ok())
-            .unwrap_or(0)
-            .min(23);
-        let model = format::rec_str(&rec, "model").unwrap_or_default();
-        let b = buckets.entry(status).or_default();
-        b.by_hour[hour] += 1;
-        b.total += 1;
-        *b.by_model.entry(model).or_insert(0) += 1;
+        fail.add(&rec, args.all);
         Ok(())
     })?;
 
-    let total_shown: u64 = buckets.values().map(|b| b.total).sum();
+    let total_scanned = fail.total_scanned;
+    let total_shown = fail.total_shown();
 
     let want_json = args.json || args.format.as_deref() == Some("json");
     if want_json {
-        return failures_json(&buckets, total_scanned, total_shown);
+        return failures_json(&fail.buckets, total_scanned, total_shown);
     }
 
-    if buckets.is_empty() {
+    if fail.buckets.is_empty() {
         if args.format.as_deref() == Some("mermaid") {
             return Ok(());
         }
@@ -1039,10 +1050,11 @@ pub fn cmd_failures(args: &FailuresArgs) -> Result<()> {
     }
 
     if args.format.as_deref() == Some("mermaid") {
-        return failures_mermaid(&buckets, total_scanned, total_shown);
+        print!("{}", failures_mermaid(&fail));
+        return Ok(());
     }
     if args.format.as_deref() == Some("csv") {
-        return failures_csv(&buckets);
+        return failures_csv(&fail.buckets);
     }
 
     let pct = if total_scanned > 0 {
@@ -1055,10 +1067,11 @@ pub fn cmd_failures(args: &FailuresArgs) -> Result<()> {
         total_shown,
         total_scanned,
         pct,
-        buckets.len()
+        fail.buckets.len()
     );
     println!();
 
+    let buckets = &fail.buckets;
     // Sort by total descending.
     let mut sorted: Vec<(&i64, &FailBucket)> = buckets.iter().collect();
     sorted.sort_by_key(|x| Reverse(x.1.total));
@@ -1152,12 +1165,10 @@ fn failures_json(
 }
 
 /// Emit failures as Mermaid: a pie of status-code share, then a timeline of
-/// peak error hours grouped by status code.
-fn failures_mermaid(
-    buckets: &BTreeMap<i64, FailBucket>,
-    _total_scanned: u64,
-    _total_shown: u64,
-) -> Result<()> {
+/// peak error hours grouped by status code. Returns the diagram text (callers
+/// print or compose into a report).
+fn failures_mermaid(fail: &FailuresAccum) -> String {
+    let buckets = &fail.buckets;
     // Pie: status code share (cardinality is small; render in full).
     let mut sorted: Vec<(&i64, &FailBucket)> = buckets.iter().collect();
     sorted.sort_by_key(|x| Reverse(x.1.total));
@@ -1168,7 +1179,7 @@ fn failures_mermaid(
             value: b.total as f64,
         })
         .collect();
-    print!("{}", mermaid::pie("Failures by status code", &slices));
+    let mut out = mermaid::pie("Failures by status code", &slices);
 
     // Timeline: peak hours per status code. One period per status, listing up
     // to 4 peak hours as "HH▲count" events.
@@ -1191,8 +1202,8 @@ fn failures_mermaid(
             });
         }
     }
-    print!("{}", mermaid::timeline("Failure peak hours", &groups));
-    Ok(())
+    out.push_str(&mermaid::timeline("Failure peak hours", &groups));
+    out
 }
 
 /// Emit failures as a tidy/long CSV: one row per (status, model) pair with
@@ -1448,7 +1459,7 @@ fn short_error(e: &str) -> String {
 // redaction (presets + helpers live in the `redact` module)
 // ---------------------------------------------------------------------------
 
-use crate::redact::compile_redact_regexes;
+use crate::redact::{self, Redactor};
 
 // ---------------------------------------------------------------------------
 // merge
@@ -1679,6 +1690,138 @@ pub fn cmd_split(args: &SplitArgs) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// report
+// ---------------------------------------------------------------------------
+
+/// Compose a single self-contained Markdown report: summary, usage charts
+/// (Mermaid), failure analysis (Mermaid), and the full conversation threads.
+/// One streaming pass accumulates stats + failures + the thread forest.
+#[derive(clap::Args)]
+pub struct ReportArgs {
+    #[arg(required = true)]
+    pub files: Vec<PathBuf>,
+    /// Write the report to this path instead of stdout (`-` for stdout).
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+    #[command(flatten)]
+    pub redact: redact::RedactArgs,
+    /// Suppress the un-redacted-secrets warning.
+    #[arg(long = "i-know", default_value_t = false)]
+    pub i_know: bool,
+    /// Omit the `## Conversations` section. It can dominate the report on a large
+    /// corpus (conversations dwarf the stats); drop it for a compact summary.
+    #[arg(long)]
+    pub no_conversations: bool,
+    #[command(flatten)]
+    pub filter: FilterArgs,
+}
+
+pub fn cmd_report(args: &ReportArgs) -> Result<()> {
+    let filter = args.filter.build()?;
+    let redactor = args.redact.build()?;
+    let do_redact = redactor.is_active();
+
+    let mut stats = StatsAccum::new();
+    let mut fail = FailuresAccum::new();
+    let mut builder = ThreadBuilder::new();
+    let mut with_messages = 0u64;
+
+    // Single pass: stats + failures + thread forest. The redaction (if any)
+    // scrubs the whole record before the thread builder parses it. Stats and
+    // failures read only numeric metadata, so the scrub doesn't affect them —
+    // but we deliberately do NOT narrow it to just message/tool text: the
+    // renderer walks several nested capture paths (messages, tool inputs and
+    // results, and could grow more), and an allowlist would silently leak any
+    // path it didn't enumerate. Whole-record scrub is defense-in-depth and
+    // keeps `report` consistent with `thread`. The extra regex scan is the same
+    // one `thread` runs; non-matching strings aren't rewritten, though the
+    // redactor allocates a fresh string per field per regex (see redact.rs).
+    for_each_matching_record(&args.files, &filter, |mut rec| {
+        if do_redact {
+            format::redact_strings(&mut rec, &|s| redactor.apply(s));
+        }
+        stats.add(&rec);
+        fail.add(&rec, false);
+        if builder.add_record(&rec)? {
+            with_messages += 1;
+        }
+        Ok(())
+    })?;
+
+    let forest = builder.to_json(stats.total.count, with_messages);
+
+    // --- compose the report ---
+    let mut out = String::new();
+    out.push_str("# czsplicer report\n\n");
+
+    // Summary
+    out.push_str("## Summary\n\n");
+    out.push_str(&format!("- **records:** {}\n", stats.total.count));
+    out.push_str(&format!(
+        "- **time span:** {} .. {}\n",
+        stats.min_ts.as_deref().unwrap_or("-"),
+        stats.max_ts.as_deref().unwrap_or("-")
+    ));
+    out.push_str(&format!("- **estimated cost:** ${:.2}\n", stats.total.cost));
+    out.push_str(&format!(
+        "- **tokens:** {} in / {} out",
+        stats.total.input_tokens, stats.total.output_tokens
+    ));
+    if stats.total.cached_tokens > 0 {
+        out.push_str(&format!(" / {} cached", stats.total.cached_tokens));
+    }
+    out.push_str("\n\n");
+
+    // Usage: cost by model (pie + daily xychart).
+    out.push_str("## Usage\n\n");
+    out.push_str("### Cost by model\n\n");
+    out.push_str(&stats_mermaid(StatsDim::Model, &stats));
+
+    // Failures: only if there are any.
+    let total_shown = fail.total_shown();
+    if total_shown > 0 {
+        out.push_str("## Failures\n\n");
+        let pct = if stats.total.count > 0 {
+            total_shown as f64 * 100.0 / stats.total.count as f64
+        } else {
+            0.0
+        };
+        out.push_str(&format!(
+            "**{}** of {} records ({:.1}%) are non-2xx.\n\n",
+            total_shown, stats.total.count, pct
+        ));
+        out.push_str(&failures_mermaid(&fail));
+    }
+
+    // Conversations. Skipped with --no-conversations (the section can be large
+    // enough to dominate the report on a big corpus — see README).
+    if !args.no_conversations
+        && forest
+            .get("root_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            > 0
+    {
+        out.push_str("## Conversations\n\n");
+        out.push_str(&md_thread::render_conversations(&forest));
+    }
+
+    // Secrets-safety net (same as thread HTML/MD).
+    if !do_redact && !args.i_know {
+        if let Some(w) = secrets::scan(&out).warning() {
+            eprintln!("{w}");
+        }
+    }
+
+    write_output(args.output.as_ref(), out.as_bytes(), "md")?;
+    eprintln!(
+        "report: {} record(s) ({} with messages), {} thread(s), {} failure(s) -> markdown",
+        stats.total.count, with_messages, forest["root_count"], total_shown,
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // thread
 // ---------------------------------------------------------------------------
 
@@ -1718,17 +1861,8 @@ pub struct ThreadArgs {
     /// Adium style variant to apply (e.g. "Dark").
     #[arg(long)]
     pub variant: Option<String>,
-    /// Redact secrets matching this regex (repeatable). Applied to message
-    /// bodies and tool text before rendering.
-    #[arg(long, value_name = "REGEX")]
-    pub redact: Vec<String>,
-    /// Redact preset(s): email, jwt, apikey, bearer, aws, ipv4, uuid, creditcard,
-    /// ssn, or `all` (repeatable).
-    #[arg(long = "redact-preset", value_name = "NAME")]
-    pub redact_presets: Vec<String>,
-    /// Replacement text for redacted spans (default `[REDACTED]`).
-    #[arg(long, value_name = "TOKEN", default_value = "[REDACTED]")]
-    pub redact_replacement: String,
+    #[command(flatten)]
+    pub redact: redact::RedactArgs,
     /// Suppress the un-redacted-secrets warning for HTML/Markdown output.
     /// The warning fires when output is emitted without `--redact*` and a
     /// likely secret (API key, bearer token, JWT, …) is detected. This flag
@@ -1741,17 +1875,8 @@ pub struct ThreadArgs {
 
 pub fn cmd_thread(args: &ThreadArgs) -> Result<()> {
     let filter = args.filter.build()?;
-    // Build the redaction regex set (mirrors `edit`).
-    let redexes = compile_redact_regexes(&args.redact, &args.redact_presets)?;
-    let redact_repl = args.redact_replacement.clone();
-    let do_redact = !redexes.is_empty();
-    let redact = |s: &str| -> String {
-        let mut cur = s.to_string();
-        for r in &redexes {
-            cur = r.replace_all(&cur, redact_repl.as_str()).to_string();
-        }
-        cur
-    };
+    let redactor = args.redact.build()?;
+    let do_redact = redactor.is_active();
 
     // Secrets-safety net: when emitting human-readable output (HTML, Markdown)
     // without `--redact*`, scan the rendered bytes for likely-secret patterns
@@ -1777,7 +1902,7 @@ pub fn cmd_thread(args: &ThreadArgs) -> Result<()> {
         if do_redact {
             // Scrub text and valid-UTF-8 byte bodies (e.g. raw HTTP) before
             // the thread builder extracts message content / metadata.
-            format::redact_strings(&mut rec, &redact);
+            format::redact_strings(&mut rec, &|s| redactor.apply(s));
         }
         total += 1;
         if builder.add_record(&rec)? {
