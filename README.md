@@ -224,7 +224,7 @@ Directory arguments are expanded to their sorted `*.cbor.zstd` contents, so
 ## Development
 
 ```sh
-cargo test                       # 144 tests (133 integration + 11 unit, synthetic fixtures)
+cargo test                       # 158 tests (146 integration + 12 unit, synthetic fixtures)
 ```
 
 The repository includes a pre-commit hook (`hooks/pre-commit`) that runs

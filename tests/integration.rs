@@ -1066,6 +1066,119 @@ fn stats_invalid_by_errors() {
         .stderr(predicate::str::contains("model|provider|path|status"));
 }
 
+#[test]
+fn stats_mermaid_emits_pie_and_xychart() {
+    let f = fixture();
+    let out = f
+        .cmd()
+        .arg("stats")
+        .arg(&f.cbor_zstd)
+        .arg("--format")
+        .arg("mermaid")
+        .arg("--by")
+        .arg("model")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).unwrap();
+    assert!(s.contains("```mermaid"), "missing mermaid fence: {s}");
+    assert!(s.contains("pie showData"), "missing pie: {s}");
+    assert!(s.contains("Cost by model"), "missing model pie title: {s}");
+    assert!(s.contains("xychart-beta"), "missing xychart: {s}");
+    assert!(s.contains("Cost by day"), "missing daily chart: {s}");
+}
+
+#[test]
+fn stats_mermaid_path_dimension_no_other_collapse() {
+    let f = fixture();
+    let out = f
+        .cmd()
+        .arg("stats")
+        .arg(&f.cbor_zstd)
+        .arg("--format")
+        .arg("mermaid")
+        .arg("--by")
+        .arg("path")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).unwrap();
+    // path is low-cardinality (3 in SOURCE_NDJSON) — no "other" collapse.
+    assert!(s.contains("Cost by path"));
+    assert!(!s.contains("\"other\""), "path should not collapse: {s}");
+}
+
+#[test]
+fn stats_json_flag_still_works_alongside_format() {
+    let f = fixture();
+    f.cmd()
+        .arg("stats")
+        .arg(&f.cbor_zstd)
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"records\""));
+}
+
+#[test]
+fn stats_mermaid_model_collapses_to_other() {
+    // 10 models each with nonzero cost → top-8 keeps 8, collapses 2 into "other".
+    let mut nd = String::new();
+    for i in 0..10 {
+        nd.push_str(&format!(
+            "{{\"id\":{i},\"timestamp\":\"2026-06-20T08:00:00Z\",\"model\":\"m{i}\",\"status_code\":200,\"estimated_cost\":{{\"dollars\":1.0}}}}\n"
+        ));
+    }
+    let f = Fixture::from_ndjson(&nd);
+    let out = f
+        .cmd()
+        .arg("stats")
+        .arg(&f.cbor_zstd)
+        .arg("--format")
+        .arg("mermaid")
+        .arg("--by")
+        .arg("model")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).unwrap();
+    assert!(s.contains("pie showData"), "missing pie: {s}");
+    assert!(
+        s.contains("\"other\""),
+        "10 models should collapse to other: {s}"
+    );
+}
+
+#[test]
+fn stats_mermaid_empty_when_all_costs_zero() {
+    // No estimated_cost → all costs 0 → pie suppressed, xychart suppressed.
+    let f = rich_fixture();
+    let out = f
+        .cmd()
+        .arg("stats")
+        .arg(&f.cbor_zstd)
+        .arg("--format")
+        .arg("mermaid")
+        .arg("--by")
+        .arg("model")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).unwrap();
+    assert!(
+        !s.contains("```mermaid"),
+        "all-zero costs should emit nothing: {s}"
+    );
+}
+
 // ===========================================================================
 // directory expansion
 // ===========================================================================
@@ -3865,5 +3978,64 @@ fn failures_no_errors_reports_clean() {
     assert!(
         stderr.contains("no failures") || stderr.contains("0 of"),
         "reports no failures cleanly: {stderr}"
+    );
+}
+
+#[test]
+fn failures_mermaid_emits_pie_and_timeline() {
+    let f = Fixture::from_ndjson(FAIL_NDJSON);
+    let out = f
+        .cmd()
+        .arg("failures")
+        .arg(&f.cbor_zstd)
+        .arg("--format")
+        .arg("mermaid")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).unwrap();
+    assert!(s.contains("```mermaid"), "missing fence: {s}");
+    assert!(s.contains("pie showData"), "missing status pie: {s}");
+    assert!(
+        s.contains("Failures by status code"),
+        "missing pie title: {s}"
+    );
+    assert!(s.contains("503"), "503 missing from pie: {s}");
+    assert!(s.contains("429"), "429 missing from pie: {s}");
+    assert!(s.contains("timeline"), "missing timeline: {s}");
+    assert!(
+        s.contains("Failure peak hours"),
+        "missing timeline title: {s}"
+    );
+    assert!(s.contains("status 503"), "missing 503 timeline group: {s}");
+    assert!(
+        !s.contains("▲"),
+        "mermaid timeline must not use sparkline notation: {s}"
+    );
+    assert!(s.contains(": 20: 1"), "missing peak-hour event: {s}");
+}
+
+#[test]
+fn failures_mermaid_clean_when_no_errors() {
+    let nd = "{\"id\":1,\"timestamp\":\"2026-06-20T08:00:00Z\",\"model\":\"alpha/one\",\"status_code\":200}\n";
+    let f = Fixture::from_ndjson(nd);
+    let out = f
+        .cmd()
+        .arg("failures")
+        .arg(&f.cbor_zstd)
+        .arg("--format")
+        .arg("mermaid")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s = String::from_utf8(out).unwrap();
+    // No failures → no diagram blocks, no panic.
+    assert!(
+        !s.contains("```mermaid"),
+        "should emit nothing when clean: {s}"
     );
 }

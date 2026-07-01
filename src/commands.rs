@@ -2,6 +2,7 @@ use crate::builtin;
 use crate::filter::{Filter, FilterArgs};
 use crate::format::{self, RecordStream};
 use crate::mailbox;
+use crate::mermaid;
 use crate::theme;
 use crate::thread::{conversation_root, ThreadBuilder};
 use anyhow::{anyhow, Result};
@@ -574,6 +575,9 @@ pub struct StatsArgs {
     pub files: Vec<PathBuf>,
     #[arg(long)]
     pub json: bool,
+    /// Output format: "text" (default), "json", "mermaid".
+    #[arg(long, value_name = "FMT")]
+    pub format: Option<String>,
     /// Breakdown dimension: "model" (default), "provider", "path", or "status".
     #[arg(long)]
     pub by: Option<String>,
@@ -620,6 +624,7 @@ pub fn cmd_stats(args: &StatsArgs) -> Result<()> {
     let mut by_provider: BTreeMap<String, Bucket> = Default::default();
     let mut by_path: BTreeMap<String, Bucket> = Default::default();
     let mut by_status: BTreeMap<String, Bucket> = Default::default();
+    let mut by_day: BTreeMap<String, f64> = Default::default();
     let mut min_ts: Option<String> = None;
     let mut max_ts: Option<String> = None;
 
@@ -648,6 +653,9 @@ pub fn cmd_stats(args: &StatsArgs) -> Result<()> {
         accumulate(by_path.entry(path).or_default(), &b);
         accumulate(by_status.entry(status).or_default(), &b);
         if let Some(ts) = format::rec_str(&rec, "timestamp") {
+            if let Some(day) = ts.get(..10) {
+                *by_day.entry(day.to_string()).or_insert(0.0) += b.cost;
+            }
             if min_ts.as_ref().map_or(true, |m| m > &ts) {
                 min_ts = Some(ts.clone());
             }
@@ -658,7 +666,8 @@ pub fn cmd_stats(args: &StatsArgs) -> Result<()> {
         Ok(())
     })?;
 
-    if args.json {
+    let want_json = args.json || args.format.as_deref() == Some("json");
+    if want_json {
         let j = serde_json::json!({
             "records": total.count,
             "input_tokens": total.input_tokens,
@@ -678,6 +687,10 @@ pub fn cmd_stats(args: &StatsArgs) -> Result<()> {
         });
         println!("{}", serde_json::to_string_pretty(&j)?);
         return Ok(());
+    }
+
+    if args.format.as_deref() == Some("mermaid") {
+        return stats_mermaid(dim, &by_model, &by_provider, &by_path, &by_status, &by_day);
     }
 
     println!("=== czsplicer stats ===");
@@ -759,6 +772,58 @@ fn buckets_json(m: &BTreeMap<String, Bucket>) -> serde_json::Value {
     serde_json::Value::Array(arr)
 }
 
+/// Top-N threshold for high-cardinality dimensions (model, provider). Top-8
+/// captures ~95% of cost on a real corpus; the rest collapses to "other".
+const MERMAID_TOP_N: usize = 8;
+
+/// Emit stats as Mermaid diagrams: a pie for the selected dimension (top-N
+/// collapsed for model/provider) and an xychart of daily cost.
+fn stats_mermaid(
+    dim: StatsDim,
+    by_model: &BTreeMap<String, Bucket>,
+    by_provider: &BTreeMap<String, Bucket>,
+    by_path: &BTreeMap<String, Bucket>,
+    by_status: &BTreeMap<String, Bucket>,
+    by_day: &BTreeMap<String, f64>,
+) -> Result<()> {
+    let (buckets, label, collapse): (&BTreeMap<String, Bucket>, &str, bool) = match dim {
+        StatsDim::Model => (by_model, "model", true),
+        StatsDim::Provider => (by_provider, "provider", true),
+        StatsDim::Path => (by_path, "path", false),
+        StatsDim::Status => (by_status, "status", false),
+    };
+
+    let mut rows: Vec<(String, f64)> = buckets.iter().map(|(k, b)| (k.clone(), b.cost)).collect();
+    if collapse {
+        rows = mermaid::top_n(rows, MERMAID_TOP_N, "other");
+    } else {
+        rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    }
+    let slices: Vec<mermaid::Slice> = rows
+        .iter()
+        .map(|(l, v)| mermaid::Slice {
+            label: l.clone(),
+            value: *v,
+        })
+        .collect();
+    print!("{}", mermaid::pie(&format!("Cost by {label}"), &slices));
+
+    if !by_day.is_empty() {
+        let pts: Vec<mermaid::Point> = by_day
+            .iter()
+            .map(|(day, c)| mermaid::Point {
+                x: day.clone(),
+                y: *c,
+            })
+            .collect();
+        print!(
+            "{}",
+            mermaid::xychart("Cost by day (USD)", &pts, "day", "$")
+        );
+    }
+    Ok(())
+}
+
 fn human_dur(ms: i64) -> String {
     let s = ms / 1000;
     if s >= 3600 {
@@ -780,6 +845,9 @@ pub struct FailuresArgs {
     pub files: Vec<PathBuf>,
     #[arg(long)]
     pub json: bool,
+    /// Output format: "text" (default), "json", "mermaid".
+    #[arg(long, value_name = "FMT")]
+    pub format: Option<String>,
     /// Include 2xx successes in the histogram (baseline contrast).
     #[arg(long)]
     pub all: bool,
@@ -860,13 +928,21 @@ pub fn cmd_failures(args: &FailuresArgs) -> Result<()> {
 
     let total_shown: u64 = buckets.values().map(|b| b.total).sum();
 
-    if args.json {
+    let want_json = args.json || args.format.as_deref() == Some("json");
+    if want_json {
         return failures_json(&buckets, total_scanned, total_shown);
     }
 
     if buckets.is_empty() {
+        if args.format.as_deref() == Some("mermaid") {
+            return Ok(());
+        }
         eprintln!("no failures found ({total_scanned} records scanned)");
         return Ok(());
+    }
+
+    if args.format.as_deref() == Some("mermaid") {
+        return failures_mermaid(&buckets, total_scanned, total_shown);
     }
 
     let pct = if total_scanned > 0 {
@@ -972,6 +1048,50 @@ fn failures_json(
         "by_status": by_status,
     });
     println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+/// Emit failures as Mermaid: a pie of status-code share, then a timeline of
+/// peak error hours grouped by status code.
+fn failures_mermaid(
+    buckets: &BTreeMap<i64, FailBucket>,
+    _total_scanned: u64,
+    _total_shown: u64,
+) -> Result<()> {
+    // Pie: status code share (cardinality is small; render in full).
+    let mut sorted: Vec<(&i64, &FailBucket)> = buckets.iter().collect();
+    sorted.sort_by_key(|x| Reverse(x.1.total));
+    let slices: Vec<mermaid::Slice> = sorted
+        .iter()
+        .map(|(s, b)| mermaid::Slice {
+            label: s.to_string(),
+            value: b.total as f64,
+        })
+        .collect();
+    print!("{}", mermaid::pie("Failures by status code", &slices));
+
+    // Timeline: peak hours per status code. One period per status, listing up
+    // to 4 peak hours as "HH▲count" events.
+    let mut groups: Vec<mermaid::TimelineGroup> = Vec::new();
+    for (s, b) in &sorted {
+        let mut hours: Vec<(usize, u64)> = (0..24)
+            .filter(|&h| b.by_hour[h] > 0)
+            .map(|h| (h, b.by_hour[h]))
+            .collect();
+        hours.sort_by_key(|x| Reverse(x.1));
+        let events: Vec<String> = hours
+            .iter()
+            .take(4)
+            .map(|(h, c)| format!("{h:02}: {c}"))
+            .collect();
+        if !events.is_empty() {
+            groups.push(mermaid::TimelineGroup {
+                period: format!("status {s}"),
+                events,
+            });
+        }
+    }
+    print!("{}", mermaid::timeline("Failure peak hours", &groups));
     Ok(())
 }
 
