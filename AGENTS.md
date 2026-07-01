@@ -15,16 +15,16 @@ array. Keep that framing in mind: every read path is record-by-record.
 
 - Rust 1.80+, edition 2021. Single binary, no workspace.
 - `cargo build` / `cargo build --release` (binary at `target/release/czsplicer`).
-- `cargo test` — 83 integration tests in `tests/integration.rs`, all synthetic.
+- `cargo test` — 144 tests total (133 integration in `tests/integration.rs` +
+  11 unit in `src/mailbox.rs`), all synthetic. 1 ignored.
 - `cargo fmt --check` is enforced. The pre-commit hook (`hooks/pre-commit`,
   enable with `git config core.hooksPath hooks`) runs `fmt --check` + `cargo
   test` when `.rs`/`.toml`/`tests/` files are staged.
 - `prod/`, `target/`, `.maki/` are git-ignored. `prod/` holds real (large)
   export data and must never be committed.
 
-Note: the README is slightly stale — it says "65 integration tests" (now 83)
-and references `cargo test -- --ignored` real-data round-trip tests that no
-longer exist in the source tree.
+Note: the README and architecture.md agree with the live `cargo test` count
+(144 passed, 1 ignored, 2 suites). Keep them in sync when the count changes.
 
 ## Repository layout
 

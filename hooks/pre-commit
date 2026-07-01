@@ -25,6 +25,12 @@ if ! cargo fmt --check; then
     exit 1
 fi
 
+echo "[pre-commit] cargo clippy -- -D warnings"
+if ! cargo clippy --quiet -- -D warnings; then
+    echo "[pre-commit] clippy lint warnings found" >&2
+    exit 1
+fi
+
 echo "[pre-commit] cargo test"
 if ! cargo test --quiet; then
     echo "[pre-commit] tests failed" >&2

@@ -19,8 +19,24 @@ use std::path::PathBuf;
 /// Files are concatenated streams of CBOR map records, zstd-compressed.
 /// Editing model: `extract` -> edit JSON (jq/any editor) -> `repack`,
 /// or use `edit` for scripted transforms (redact / strip / drop).
+///
+/// Quick start — looking at an export:
+///
+///   czsplicer info prod/             # what's in here? counts, sizes, ranges
+///   czsplicer ls prod/               # one row per record
+///   czsplicer stats prod/ --by model # tokens / cost / latency, grouped
+///   czsplicer thread prod/ --html -o threads.html   # readable conversations
+///   czsplicer verify prod/           # integrity-check every record
+///
+/// Every selection command (ls/extract/edit/grep/stats/thread/...) shares the
+/// same filter flags (`--id`, `--model`, `--since`, `--invert`, ...).
 #[derive(Parser)]
-#[command(name = "czsplicer", version, propagate_version = true)]
+#[command(
+    name = "czsplicer",
+    version,
+    propagate_version = true,
+    arg_required_else_help = true
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,

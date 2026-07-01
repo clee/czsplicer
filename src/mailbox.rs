@@ -151,6 +151,7 @@ fn emit_forest<E: FnMut(Email) -> Result<()>>(
 /// role change — those become children of the collapsed email. This collapses
 /// e.g. `[system, system]` or `[assistant(tool_use), assistant(tool_use)]`
 /// sequences into one email while keeping branch points as separate replies.
+#[allow(clippy::too_many_arguments)]
 fn walk_node<E: FnMut(Email) -> Result<()>>(
     node: &Json,
     parent_msgid: Option<String>,

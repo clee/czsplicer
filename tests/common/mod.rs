@@ -65,7 +65,6 @@ impl Fixture {
     /// Run `czsplicer` against the fixture.
     pub fn cmd(&self) -> Command {
         let mut c = Command::cargo_bin("czsplicer").expect("binary");
-        c.env("APOLOG_FIXTURE", &self.cbor_zstd);
         c
     }
 }

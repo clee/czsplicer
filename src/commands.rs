@@ -5,6 +5,7 @@ use crate::mailbox;
 use crate::theme;
 use crate::thread::{conversation_root, ThreadBuilder};
 use anyhow::{anyhow, Result};
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -822,7 +823,7 @@ fn peak_hours(hours: &[u64; 24], top: usize) -> String {
         .filter(|&h| hours[h] > 0)
         .map(|h| (h, hours[h]))
         .collect();
-    peaks.sort_by(|a, b| b.1.cmp(&a.1));
+    peaks.sort_by_key(|x| Reverse(x.1));
     peaks
         .iter()
         .take(top)
@@ -884,7 +885,7 @@ pub fn cmd_failures(args: &FailuresArgs) -> Result<()> {
 
     // Sort by total descending.
     let mut sorted: Vec<(&i64, &FailBucket)> = buckets.iter().collect();
-    sorted.sort_by(|a, b| b.1.total.cmp(&a.1.total));
+    sorted.sort_by_key(|x| Reverse(x.1.total));
 
     // Sparkline table.
     for &(status, b) in &sorted {
@@ -916,7 +917,7 @@ pub fn cmd_failures(args: &FailuresArgs) -> Result<()> {
             (m, tot, codes)
         })
         .collect();
-    model_rows.sort_by(|a, b| b.1.cmp(&a.1));
+    model_rows.sort_by_key(|x| Reverse(x.1));
 
     let label = if args.all {
         "BY MODEL (all records)"
