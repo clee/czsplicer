@@ -83,19 +83,22 @@ content share the same Markdown document.
   section; branch points are noted inline and shared prefixes are not
   re-rendered. Mirrors `builtin.rs`.
 
-### Secrets-safety net
+### Secrets-safety net (shipped)
 
-- When emitting any human-readable output (HTML/Markdown/mbox/EPUB) **without**
-  `--redact*`, run the canned preset regexes (`bearer`, `apikey`, `jwt`, …) as
-  a **detector** over the to-be-written bytes.
-- On a hit: print a stderr warning naming the offending field/record pointer,
-  quoting the matched pattern (not the secret), and pointing at
-  `--redact-preset all`. Opt out with `--i-know`.
-- **Detection only — never mutates output.** Reuses `compile_redact_regexes` +
-  the preset table.
-- Warning wording must make clear it's a **best-effort heuristic**, not a
-  guarantee — custom token shapes (`x-ts-internal-…`) will not be caught. The
-  goal is to prevent the embarrassing day-one leak, not promise safety.
+- When emitting HTML/Markdown output **without** `--redact*`, scan the rendered
+  bytes for likely-secret patterns and print a stderr warning. Opt out with
+  `--i-know`; silent when `--redact*` was applied (output already scrubbed).
+- **Detection only — never mutates output.** Reads the final rendered bytes.
+- **High-precision subset only** of `REDACT_PRESETS`: jwt, apikey, bearer, aws,
+  secretkey, creditcard, ssn. Deliberately **excludes email/ipv4/uuid** — those
+  appear routinely in legitimate metadata and would cry wolf. Patterns are
+  sourced from the single shared `REDACT_PRESETS` table (no duplication).
+- **Scope (v1): HTML (builtin + themed) and Markdown.** mbox/maildir are *not*
+  scanned — their renderers stream to files/dirs without a single in-memory
+  buffer, and the warning is best-effort anyway. EPUB inherits the same
+  constraint when it lands.
+- Warning wording explicitly calls it a **best-effort heuristic** — custom token
+  shapes are NOT caught — so it never creates false confidence.
 
 ### EPUB + Kindle (azw3) output — later release
 
@@ -161,21 +164,26 @@ because the proprietary-compression half is already built in `~/src/huffcomp`.
    behavior. **Convention going forward: any PR that changes the command
    surface or test count updates the README in the same change.**
 
-### Phase 2 — foundations (ship as standalone flags)
+### Phase 2 — foundations (ship as standalone flags) — COMPLETE
 
 Each piece is individually useful and unblocks Phase 3.
 
-2. **Mermaid emitters** — `pie`, `xychart-beta`, `timeline`, `flowchart`,
+2. ✅ **Mermaid emitters** — `pie`, `xychart-beta`, `timeline`, `flowchart`,
    `sequenceDiagram`. Pure string emission over buckets `stats`/`failures`
    already compute. Add top-N/bucketing policy. Expose via
    `stats --format mermaid`, `failures --format mermaid`.
-3. **Markdown thread renderer** — `thread --format md`. Trie walker →
-   **linear root-to-leaf path flattening** (the only scheme surviving
-   depth-749 trees; nested headings/lists cap at 6). Each path is one section;
-   branch points noted inline. User turns as blockquotes, tool calls fenced.
-4. **CSV emitter** — `stats --format csv`, `failures --format csv`, `ls --csv`.
-   Tiny; tabular sibling to `--json`.
-5. **Secrets-safety net** — detector on all human-readable output paths.
+2. ✅ **Mermaid emitters** — `pie`, `xychart-beta`, `timeline` (the analysis
+   set). Pure string emission over buckets `stats`/`failures` already compute,
+   plus a top-N/bucketing policy. Expose via `stats --format mermaid`,
+   `failures --format mermaid`. (Structure diagrams `flowchart`/
+   `sequenceDiagram` are deferred — see Phase 4.)
+3. ✅ **Markdown thread renderer** — `thread --format md`. Trie walker →
+   linear path flattening (the only scheme surviving depth-749 trees; see
+   resolved item above). Headings + fenced tool blocks + user-as-blockquote.
+4. ✅ **CSV emitter** — `stats --format csv`, `failures --format csv`,
+   `ls --format csv`. Tabular sibling to `--json`.
+5. ✅ **Secrets-safety net** — detector on HTML/Markdown output paths
+   (see "Secrets-safety net (shipped)" above).
 
 ### Phase 3 — the centerpiece
 

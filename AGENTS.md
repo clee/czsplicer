@@ -15,8 +15,8 @@ array. Keep that framing in mind: every read path is record-by-record.
 
 - Rust 1.80+, edition 2021. Single binary, no workspace.
 - `cargo build` / `cargo build --release` (binary at `target/release/czsplicer`).
-- `cargo test` — 175 passed, 1 ignored (2 suites; integration in `tests/integration.rs`,
-  unit in `src/mailbox.rs` + `src/mermaid.rs` + `src/csv.rs`), all synthetic.
+- `cargo test` — 189 passed, 1 ignored (2 suites; integration in `tests/integration.rs`,
+  unit in `src/mailbox.rs` + `src/mermaid.rs` + `src/csv.rs` + `src/secrets.rs`), all synthetic.
 - `cargo fmt --check` is enforced. The pre-commit hook (`hooks/pre-commit`,
   enable with `git config core.hooksPath hooks`) runs `fmt --check` + `cargo
   test` when `.rs`/`.toml`/`tests/` files are staged.
@@ -24,7 +24,7 @@ array. Keep that framing in mind: every read path is record-by-record.
   export data and must never be committed.
 
 Note: the README and architecture.md agree with the live `cargo test` count
-(175 passed, 1 ignored, 2 suites). Keep them in sync when the count changes.
+(189 passed, 1 ignored, 2 suites). Keep them in sync when the count changes.
 
 ## Repository layout
 
@@ -34,6 +34,7 @@ src/
   commands.rs  one *Args (clap) struct + cmd_* fn per subcommand. ~2/3 of code.
   filter.rs    Filter + FilterArgs, shared by all selection commands
   format.rs    CBOR<->JSON bridge, RecordStream, ZstdPacker, redact/search, field accessors
+  redact.rs    shared redaction preset table + compile_redact_regexes (consumed by edit/thread/report/secrets)
   thread.rs    conversation-thread reconstruction (trie over message-content hashes) + RecordMeta
   render.rs    shared helpers for the HTML renderers (escape_html, truncate, sender_color, best_record_id, ...) + clip_chars
   markdown.rs  minimal safe Markdown->HTML subset for the built-in renderer
@@ -51,7 +52,7 @@ vendor/             highlight.js (BSD-3-Clause) + CSS themes, embedded via inclu
 ```
 
 No `mod.rs` under `src/`; `main.rs` declares
-`mod builtin; mod commands; mod csv; mod filter; mod format; mod mailbox; mod markdown; mod md_thread; mod mermaid; mod render; mod theme; mod thread;`.
+`mod builtin; mod commands; mod csv; mod filter; mod format; mod mailbox; mod markdown; mod md_thread; mod mermaid; mod redact; mod render; mod secrets; mod theme; mod thread;`.
 
 ## Architecture & data flow
 

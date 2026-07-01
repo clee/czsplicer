@@ -3334,6 +3334,140 @@ fn thread_md_writes_to_file_with_minus_o() {
 }
 
 // ===========================================================================
+// thread secrets-safety net (HTML / Markdown warning)
+// ===========================================================================
+
+/// NDJSON with an OpenAI-style API key embedded in a user message.
+const SECRET_NDJSON: &str = "{\"id\":1,\"timestamp\":\"2026-06-20T08:00:00Z\",\"model\":\"m\",\"path\":\"/v1/messages\",\"status_code\":200,\"capture\":{\"requestBody\":\"{\\\"messages\\\":[{\\\"role\\\":\\\"system\\\",\\\"content\\\":\\\"S\\\"},{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"my key is sk-abcdefghijklmnopqrstuvwxyz1234567890\\\"}],\\\"model\\\":\\\"m\\\"}\"}}";
+
+#[test]
+fn secrets_warning_fires_on_html_with_secret() {
+    let f = Fixture::from_ndjson(SECRET_NDJSON);
+    let out = f
+        .cmd()
+        .arg("thread")
+        .arg(&f.cbor_zstd)
+        .arg("--format")
+        .arg("html")
+        .arg("-o")
+        .arg(f.dir.join("o.html"))
+        .assert()
+        .success()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(out).unwrap();
+    assert!(
+        stderr.contains("un-redacted secrets"),
+        "should warn: {stderr}"
+    );
+    assert!(stderr.contains("apikey"), "should name the type: {stderr}");
+    assert!(
+        stderr.contains("--i-know"),
+        "should mention opt-out: {stderr}"
+    );
+}
+
+#[test]
+fn secrets_warning_fires_on_markdown_with_secret() {
+    let f = Fixture::from_ndjson(SECRET_NDJSON);
+    let out = f
+        .cmd()
+        .arg("thread")
+        .arg(&f.cbor_zstd)
+        .arg("--format")
+        .arg("md")
+        .arg("-o")
+        .arg(f.dir.join("o.md"))
+        .assert()
+        .success()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(out).unwrap();
+    assert!(
+        stderr.contains("un-redacted secrets"),
+        "md should warn: {stderr}"
+    );
+}
+
+#[test]
+fn secrets_warning_suppressed_by_i_know() {
+    let f = Fixture::from_ndjson(SECRET_NDJSON);
+    let out = f
+        .cmd()
+        .arg("thread")
+        .arg(&f.cbor_zstd)
+        .arg("--format")
+        .arg("html")
+        .arg("--i-know")
+        .arg("-o")
+        .arg(f.dir.join("o.html"))
+        .assert()
+        .success()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(out).unwrap();
+    assert!(
+        !stderr.contains("un-redacted secrets"),
+        "--i-know should suppress: {stderr}"
+    );
+}
+
+#[test]
+fn secrets_warning_silent_when_redacted() {
+    // With --redact-preset apikey the key is scrubbed before rendering, so the
+    // detector finds nothing and stays silent.
+    let f = Fixture::from_ndjson(SECRET_NDJSON);
+    let out = f
+        .cmd()
+        .arg("thread")
+        .arg(&f.cbor_zstd)
+        .arg("--format")
+        .arg("html")
+        .arg("--redact-preset")
+        .arg("apikey")
+        .arg("-o")
+        .arg(f.dir.join("o.html"))
+        .assert()
+        .success()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(out).unwrap();
+    assert!(
+        !stderr.contains("un-redacted secrets"),
+        "redacted output should not warn: {stderr}"
+    );
+}
+
+#[test]
+fn secrets_warning_silent_on_clean_input() {
+    // No secret in the conversation → no warning.
+    let nd = "{\"id\":1,\"timestamp\":\"2026-06-20T08:00:00Z\",\"model\":\"m\",\"path\":\"/v1/messages\",\"status_code\":200,\"capture\":{\"requestBody\":\"{\\\"messages\\\":[{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"just a normal chat\\\"}],\\\"model\\\":\\\"m\\\"}\"}}";
+    let f = Fixture::from_ndjson(nd);
+    let out = f
+        .cmd()
+        .arg("thread")
+        .arg(&f.cbor_zstd)
+        .arg("--format")
+        .arg("html")
+        .arg("-o")
+        .arg(f.dir.join("o.html"))
+        .assert()
+        .success()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(out).unwrap();
+    assert!(
+        !stderr.contains("un-redacted secrets"),
+        "clean input should not warn: {stderr}"
+    );
+}
+
+// ===========================================================================
 // tree --html (built-in long-form renderer)
 // ===========================================================================
 

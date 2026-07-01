@@ -7,7 +7,9 @@ mod mailbox;
 mod markdown;
 mod md_thread;
 mod mermaid;
+mod redact;
 mod render;
+mod secrets;
 mod theme;
 mod thread;
 

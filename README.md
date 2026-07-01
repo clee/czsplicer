@@ -162,6 +162,13 @@ controls mbox/maildir body rendering: `plain`, `html` (multipart/alternative,
 default), `html-only`. Redaction runs on message bodies and tool text *before*
 rendering, so secrets never reach the output file.
 
+> **Heuristic secrets warning.** When you emit HTML or Markdown *without*
+> `--redact*`, czsplicer scans the output for common secret shapes (API keys,
+> bearer tokens, JWTs, AWS keys, credit cards, SSNs) and prints a stderr
+> warning listing the hits. It's a best-effort check, not a guarantee — custom
+> token shapes aren't caught. Pass `--i-know` to suppress it, or re-run with
+> `--redact-preset all` to scrub.
+
 ### Failure analysis
 
 See when errors happen and which models are responsible. The default view shows a
@@ -230,7 +237,7 @@ Directory arguments are expanded to their sorted `*.cbor.zstd` contents, so
 ## Development
 
 ```sh
-cargo test                       # 175 passed, 1 ignored (2 suites; unit tests in mailbox/mermaid/csv)
+cargo test                       # 189 passed, 1 ignored (2 suites; unit tests in mailbox/mermaid/csv/secrets)
 ```
 
 The repository includes a pre-commit hook (`hooks/pre-commit`) that runs
