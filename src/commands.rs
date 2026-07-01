@@ -2,6 +2,7 @@ use crate::builtin;
 use crate::filter::{Filter, FilterArgs};
 use crate::format::{self, RecordStream};
 use crate::mailbox;
+use crate::md_thread;
 use crate::mermaid;
 use crate::theme;
 use crate::thread::{conversation_root, ThreadBuilder};
@@ -1649,6 +1650,7 @@ pub enum ThreadFormat {
     Html,
     Mbox,
     Maildir,
+    Md,
 }
 
 #[derive(clap::Args)]
@@ -1658,7 +1660,7 @@ pub struct ThreadArgs {
     /// Write JSON/HTML/MBOX/Maildir to this path instead of stdout (`-` for stdout).
     #[arg(short, long)]
     pub output: Option<PathBuf>,
-    /// Output format: json (default), html (built-in renderer), mbox, maildir.
+    /// Output format: json (default), html (built-in renderer), mbox, maildir, md.
     #[arg(long, value_enum, default_value = "json")]
     pub format: ThreadFormat,
     /// Body rendering for mbox/maildir: plain, html (multipart/alternative), html-only.
@@ -1778,6 +1780,13 @@ pub fn cmd_thread(args: &ThreadArgs) -> Result<()> {
             args.body,
             out.display()
         );
+        return Ok(());
+    }
+
+    if args.format == ThreadFormat::Md {
+        let md = md_thread::render_md(&j);
+        write_output(args.output.as_ref(), md.as_bytes(), "md")?;
+        eprintln!("{}; markdown", thread_summary(total, with_messages, &j));
         return Ok(());
     }
 

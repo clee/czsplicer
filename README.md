@@ -147,11 +147,14 @@ czsplicer thread prod/ --format mbox -o threads.mbox
 # Maildir (one file per message) with plain-text bodies instead of HTML.
 czsplicer thread prod/ --format maildir --body plain -o maildir/
 
+# Markdown (one document, pasteable into GitHub/Notion/wikis; branch-safe).
+czsplicer thread prod/ --format md -o threads.md
+
 # Redact secrets in the rendered output (same presets as `edit`).
 czsplicer thread prod/ --format html --redact-preset all -o threads.html
 ```
 
-Formats: `json` (default), `html` (built-in), `mbox`, `maildir`. `--body`
+Formats: `json` (default), `html` (built-in), `mbox`, `maildir`, `md`. `--body`
 controls mbox/maildir body rendering: `plain`, `html` (multipart/alternative,
 default), `html-only`. Redaction runs on message bodies and tool text *before*
 rendering, so secrets never reach the output file.
@@ -224,7 +227,7 @@ Directory arguments are expanded to their sorted `*.cbor.zstd` contents, so
 ## Development
 
 ```sh
-cargo test                       # 158 tests (146 integration + 12 unit, synthetic fixtures)
+cargo test                       # 164 tests (146 integration + 18 unit, synthetic fixtures)
 ```
 
 The repository includes a pre-commit hook (`hooks/pre-commit`) that runs

@@ -3109,6 +3109,137 @@ fn theme_loads_lowercase_dirs_and_styles_base_css() {
 }
 
 // ===========================================================================
+// thread --format md (Markdown renderer)
+// ===========================================================================
+
+/// Run `thread --format md` on an NDJSON corpus and return the Markdown output.
+fn thread_md(ndjson: &str) -> String {
+    let f = Fixture::from_ndjson(ndjson);
+    let out = Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("thread")
+        .arg(&f.cbor_zstd)
+        .arg("--format")
+        .arg("md")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    String::from_utf8(out).expect("valid utf8 markdown")
+}
+
+#[test]
+fn thread_md_renders_summary_header() {
+    let nd = format!(
+        "{}\n",
+        rec(1, &body_with_messages("S", &[("user", "hello")]))
+    );
+    let md = thread_md(&nd);
+    assert!(
+        md.starts_with("# Conversation threads"),
+        "missing title: {md}"
+    );
+    assert!(md.contains("**1 records**"), "missing record count: {md}");
+    assert!(md.contains("**1 thread(s)**"), "missing thread count: {md}");
+}
+
+#[test]
+fn thread_md_user_messages_are_blockquotes() {
+    let nd = format!(
+        "{}\n",
+        rec(1, &body_with_messages("S", &[("user", "hello world")]))
+    );
+    let md = thread_md(&nd);
+    // User content rendered as a blockquote.
+    assert!(
+        md.contains("> hello world"),
+        "user content not blockquote: {md}"
+    );
+    // System content rendered as body prose (NOT a blockquote).
+    assert!(md.contains("S\n"), "system content missing: {md}");
+    // User turn labelled "you".
+    assert!(md.contains("**you**"), "user not labelled 'you': {md}");
+}
+
+#[test]
+fn thread_md_linear_chain_single_path() {
+    let nd = format!(
+        "{}\n{}\n",
+        rec(1, &body_with_messages("S", &[("user", "hello")])),
+        rec(
+            2,
+            &body_with_messages("S", &[("user", "hello"), ("assistant", "hi")])
+        ),
+    );
+    let md = thread_md(&nd);
+    assert!(md.contains("### Path 1"), "missing path heading: {md}");
+    // A linear chain yields exactly one path.
+    assert!(
+        !md.contains("### Path 2"),
+        "linear chain should have one path: {md}"
+    );
+}
+
+#[test]
+fn thread_md_renders_each_branch_as_a_path() {
+    // Two records diverging at the first user message → two paths.
+    let nd = format!(
+        "{}\n{}\n",
+        rec(1, &body_with_messages("S", &[("user", "hello")])),
+        rec(2, &body_with_messages("S", &[("user", "goodbye")]))
+    );
+    let md = thread_md(&nd);
+    assert!(md.contains("### Path 1"), "missing path 1: {md}");
+    assert!(md.contains("### Path 2"), "missing path 2: {md}");
+    // Both user messages should appear (one per path).
+    assert!(md.contains("> hello"), "missing branch A content: {md}");
+    assert!(md.contains("> goodbye"), "missing branch B content: {md}");
+}
+
+#[test]
+fn thread_md_section_title_from_root_preview() {
+    let nd = format!(
+        "{}\n",
+        rec(
+            1,
+            &body_with_messages("SystemPrompt", &[("user", "How do I bake bread?")])
+        )
+    );
+    let md = thread_md(&nd);
+    // Section title comes from the root preview (system prompt first line).
+    assert!(
+        md.contains("## SystemPrompt"),
+        "section title from root: {md}"
+    );
+}
+
+#[test]
+fn thread_md_writes_to_file_with_minus_o() {
+    let nd = format!(
+        "{}\n",
+        rec(1, &body_with_messages("S", &[("user", "hello")]))
+    );
+    let f = Fixture::from_ndjson(&nd);
+    let tmp = f.dir.join("out.md");
+    Command::cargo_bin("czsplicer")
+        .unwrap()
+        .arg("thread")
+        .arg(&f.cbor_zstd)
+        .arg("--format")
+        .arg("md")
+        .arg("-o")
+        .arg(&tmp)
+        .assert()
+        .success();
+    let written = std::fs::read_to_string(&tmp).unwrap();
+    assert!(
+        written.contains("# Conversation threads"),
+        "file output: {written}"
+    );
+}
+
+// ===========================================================================
 // tree --html (built-in long-form renderer)
 // ===========================================================================
 

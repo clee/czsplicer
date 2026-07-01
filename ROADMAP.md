@@ -19,7 +19,10 @@ taken and the phased plan for implementation. Items below this line are
 ## The two graph problems (kept distinct)
 
 1. **Structure graphs** — the conversation trie (branches, turns, tool calls).
-   Solved by Mermaid flowchart + sequenceDiagram.
+   Rendered as **flattened root-to-leaf path prose** (the only scheme that
+   survives depth-749 trees — see the resolved item below). Mermaid
+   `flowchart`/`sequenceDiagram` renderings of structure are deferred (they cap
+   out well below real conversation depth).
 2. **Analysis graphs** — aggregates over records (cost/day, tokens by model,
    status by provider, error rate by hour). Computed by `stats`/`failures`,
    rendered by Mermaid pie/xychart/timeline + emitted as CSV.
@@ -37,11 +40,13 @@ content share the same Markdown document.
 - **CSV/TSV** is added for the spreadsheet / own-tool audience. Tabular
   commands (`stats`, `failures`, `ls`) gain `--format csv`. JSON stays; CSV is a
   new sibling, not a replacement.
-- **Mermaid diagram types to support:**
-  - Structure: `flowchart` (conversation tree outline with branch points),
-    `sequenceDiagram` (turn-by-turn request→response→tool).
-  - Analysis: `pie` (model / status share), `xychart-beta` (cost or tokens over
-    time), `timeline` (incident bursts).
+- **Mermaid diagram types:**
+  - Analysis (v0.4): `pie` (model / status share), `xychart-beta` (cost or
+    tokens over time), `timeline` (incident bursts).
+  - Structure (deferred to Phase 4): `flowchart` (conversation tree outline
+    with branch points), `sequenceDiagram` (turn-by-turn
+    request→response→tool). Both cap out well below real conversation depth, so
+    v0.4 renders structure as flattened prose instead.
   - *Not* doing Mermaid `gitGraph` for v1 — see "deferred."
 - **Aggregation policy for scale:** top-N + "other" collapse for pies; per-day
   or per-hour bucketing for xychart. Naive full-resolution Mermaid chokes past
@@ -59,7 +64,7 @@ content share the same Markdown document.
   ## Failures         — Mermaid timeline (incident bursts) + status breakdown
   ## Conversations
     ### <thread title>
-      <Mermaid flowchart of the branch structure>
+      <flattened root-to-leaf paths; branch points noted inline>
       <full Markdown prose of the turns, tool calls fenced>
   ```
 - The underlying Mermaid emitters, Markdown thread renderer, and CSV emitter
@@ -68,13 +73,15 @@ content share the same Markdown document.
 
 ### Markdown thread renderer
 
-- Headings per turn; fenced code blocks for tool-call bodies; branch points
-  as nested sections with anchors.
+- Headings per turn; fenced code blocks for tool-call bodies.
 - Reuses the existing trie walker (`thread::all_paths`); conceptually the
   reverse flavor of the existing `markdown.rs` md→HTML parser.
-- *[open]* Branch representation within Markdown: linear-with-anchors vs.
-  per-conversation "## Branches" outline at top with anchor links. Pick before
-  implementing.
+- *[resolved 2026-07-01]* **Linear root-to-leaf path flattening.** Real
+  `days/` data contains depth-749 trees and 20-way branches; Markdown headings
+  cap at 6 and nested lists get unreadable past ~6, so headings-per-turn /
+  nested-section / anchor schemes are impossible. Each root-to-leaf path is one
+  section; branch points are noted inline and shared prefixes are not
+  re-rendered. Mirrors `builtin.rs`.
 
 ### Secrets-safety net
 
@@ -162,9 +169,10 @@ Each piece is individually useful and unblocks Phase 3.
    `sequenceDiagram`. Pure string emission over buckets `stats`/`failures`
    already compute. Add top-N/bucketing policy. Expose via
    `stats --format mermaid`, `failures --format mermaid`.
-3. **Markdown thread renderer** — `thread --format md`. Trie walker → headings
-   + fenced tool blocks + branch anchors. Resolve the [open] branch
-   representation first.
+3. **Markdown thread renderer** — `thread --format md`. Trie walker →
+   **linear root-to-leaf path flattening** (the only scheme surviving
+   depth-749 trees; nested headings/lists cap at 6). Each path is one section;
+   branch points noted inline. User turns as blockquotes, tool calls fenced.
 4. **CSV emitter** — `stats --format csv`, `failures --format csv`, `ls --csv`.
    Tiny; tabular sibling to `--json`.
 5. **Secrets-safety net** — detector on all human-readable output paths.
@@ -172,8 +180,8 @@ Each piece is individually useful and unblocks Phase 3.
 ### Phase 3 — the centerpiece
 
 6. **`report` command** — composes summary + stats-mermaid + failures-mermaid +
-   per-thread (flowchart + prose) into one `.md`. This is the OSS-launch
-   headline artifact.
+   per-thread flattened prose into one `.md`. This is the OSS-launch headline
+   artifact.
 7. **HTML report (stretch)** — same composition, rendered: vendored mermaid.js +
    existing builtin thread HTML. Opt-in, not the default.
 
@@ -186,8 +194,14 @@ Each piece is individually useful and unblocks Phase 3.
 
 ## Open questions to resolve before each phase
 
-- *Phase 2, item 3:* Markdown branch representation (linear-with-anchors vs.
-  top-of-conversation outline).
+- *Phase 2, item 3:* **RESOLVED 2026-07-01 against real `days/` data.** A
+  single day (2026-06-21) contains a tree of depth **749** (752 nodes) and
+  20/21 trees have branches. Markdown headings cap at 6 levels and indented
+  lists get unreadable past ~6, so **headings-per-turn / nested-list schemes
+  are impossible.** The renderer mirrors `builtin.rs`: each root-to-leaf path
+  (`thread::all_paths`) becomes one linear section. Branch points are marked
+  inline and cross-referenced via anchors ("→ continues from path N at turn
+  M"); shared prefixes are noted, not re-rendered.
 - *Phase 2, item 2:* **RESOLVED 2026-07-01 against real `days/` data
   (17,484 records, $1,199, 25 models, ~110-day span):**
   - **Top-N = 8 + "other"** for model aggregation (top-8 ≈ 95% of cost; the

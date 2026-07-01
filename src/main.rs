@@ -4,6 +4,7 @@ mod filter;
 mod format;
 mod mailbox;
 mod markdown;
+mod md_thread;
 mod mermaid;
 mod render;
 mod theme;

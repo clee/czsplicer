@@ -15,8 +15,8 @@ array. Keep that framing in mind: every read path is record-by-record.
 
 - Rust 1.80+, edition 2021. Single binary, no workspace.
 - `cargo build` / `cargo build --release` (binary at `target/release/czsplicer`).
-- `cargo test` — 158 tests total (146 integration in `tests/integration.rs` +
-  12 unit in `src/mailbox.rs` + `src/mermaid.rs`), all synthetic. 1 ignored.
+- `cargo test` — 164 tests total (146 integration in `tests/integration.rs` +
+  18 unit across `src/mailbox.rs` + `src/mermaid.rs`), all synthetic. 1 ignored.
 - `cargo fmt --check` is enforced. The pre-commit hook (`hooks/pre-commit`,
   enable with `git config core.hooksPath hooks`) runs `fmt --check` + `cargo
   test` when `.rs`/`.toml`/`tests/` files are staged.
@@ -24,7 +24,7 @@ array. Keep that framing in mind: every read path is record-by-record.
   export data and must never be committed.
 
 Note: the README and architecture.md agree with the live `cargo test` count
-(158 passed, 1 ignored, 2 suites). Keep them in sync when the count changes.
+(164 passed, 1 ignored, 2 suites). Keep them in sync when the count changes.
 
 ## Repository layout
 
@@ -38,6 +38,7 @@ src/
   render.rs    shared helpers for the HTML renderers (escape_html, truncate, sender_color, best_record_id, ...) + clip_chars
   markdown.rs  minimal safe Markdown->HTML subset for the built-in renderer
   mermaid.rs   Mermaid diagram emitters (pie/xychart/timeline) for `stats --format mermaid` / `failures --format mermaid`
+  md_thread.rs Markdown thread renderer (`thread --format md`) — linear path flattening, mirrors builtin.rs
   builtin.rs   built-in long-form HTML renderer (wide column, markdown, status/tool chips)
   theme.rs     Adium .AdiumMessageStyle loader + renderer (--theme, optional)
   mailbox.rs   mbox/Maildir export (RFC822 + threading via Message-ID/In-Reply-To)
@@ -50,7 +51,7 @@ vendor/             highlight.js (BSD-3-Clause) + CSS themes, embedded via inclu
 ```
 
 No `mod.rs` under `src/`; `main.rs` declares
-`mod builtin; mod commands; mod filter; mod format; mod mailbox; mod markdown; mod mermaid; mod render; mod theme; mod thread;`.
+`mod builtin; mod commands; mod filter; mod format; mod mailbox; mod markdown; mod md_thread; mod mermaid; mod render; mod theme; mod thread;`.
 
 ## Architecture & data flow
 
