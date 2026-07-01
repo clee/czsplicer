@@ -258,7 +258,7 @@ Directory arguments are expanded to their sorted `*.cbor.zstd` contents, so
 ## Development
 
 ```sh
-cargo test                       # 193 passed, 1 ignored (2 suites; unit tests in mailbox/mermaid/csv/secrets)
+cargo test                       # 194 passed, 1 ignored (2 suites; unit tests in mailbox/mermaid/csv/secrets)
 ```
 
 The repository includes a pre-commit hook (`hooks/pre-commit`) that runs

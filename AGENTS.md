@@ -15,7 +15,7 @@ array. Keep that framing in mind: every read path is record-by-record.
 
 - Rust 1.80+, edition 2021. Single binary, no workspace.
 - `cargo build` / `cargo build --release` (binary at `target/release/czsplicer`).
-- `cargo test` — 193 passed, 1 ignored (2 suites; integration in `tests/integration.rs`,
+- `cargo test` — 194 passed, 1 ignored (2 suites; integration in `tests/integration.rs`,
   unit in `src/mailbox.rs` + `src/mermaid.rs` + `src/csv.rs` + `src/secrets.rs`), all synthetic.
 - `cargo fmt --check` is enforced. The pre-commit hook (`hooks/pre-commit`,
   enable with `git config core.hooksPath hooks`) runs `fmt --check` + `cargo
@@ -24,7 +24,7 @@ array. Keep that framing in mind: every read path is record-by-record.
   export data and must never be committed.
 
 Note: the README and architecture.md agree with the live `cargo test` count
-(193 passed, 1 ignored, 2 suites). Keep them in sync when the count changes.
+(194 passed, 1 ignored, 2 suites). Keep them in sync when the count changes.
 
 ## Repository layout
 
