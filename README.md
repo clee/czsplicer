@@ -136,7 +136,7 @@ continuation collapse to one node.
 czsplicer thread prod/
 
 # Self-contained long-form HTML (one file, no external theme).
-czsplicer thread prod/ --html --dark -o threads.html
+czsplicer thread prod/ --format html --dark -o threads.html
 
 # Render through an Adium .AdiumMessageStyle bundle (optional, --variant Dark).
 czsplicer thread prod/ --theme Spike.AdiumMessageStyle -o threads.html
@@ -148,7 +148,7 @@ czsplicer thread prod/ --format mbox -o threads.mbox
 czsplicer thread prod/ --format maildir --body plain -o maildir/
 
 # Redact secrets in the rendered output (same presets as `edit`).
-czsplicer thread prod/ --html --redact-preset all -o threads.html
+czsplicer thread prod/ --format html --redact-preset all -o threads.html
 ```
 
 Formats: `json` (default), `html` (built-in), `mbox`, `maildir`. `--body`

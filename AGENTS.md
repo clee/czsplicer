@@ -68,7 +68,6 @@ Every selection command (`ls`, `extract`, `grep`, `edit`, `stats`, `merge`,
 `verify` and `repack` don't filter; `info` summarizes without streaming
 transforms. `thread` builds an in-memory trie over the whole filtered set (one
 synthetic Node per distinct message — see invariant 5).
-transforms.
 
 The clap `*Args` structs live in `commands.rs` and are passed directly into
 `cmd_*` from `main.rs` — there is no separate parallel struct layer.

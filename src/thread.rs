@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 /// realistic dataset.
 const HASH_HEX_LEN: usize = 16;
 /// Max characters in a node preview string.
-const PREVIEW_LEN: usize = 160;
+pub const PREVIEW_LEN: usize = 160;
 
 /// A normalized, hashed message — one element of a conversation path.
 pub struct MsgInfo {

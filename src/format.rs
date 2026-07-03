@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use serde_json::{Map as JsonMap, Number, Value as Json};
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
@@ -182,7 +182,7 @@ impl<R: BufRead> RecordStream<R> {
 impl RecordStream<BufReader<ZDecoder>> {
     /// Open a `.cbor.zstd` file as a stream of CBOR records.
     pub fn open(path: &Path) -> Result<Self> {
-        let f = File::open(path)?;
+        let f = File::open(path).with_context(|| path.display().to_string())?;
         let dec: ZDecoder = zstd::Decoder::new(f)?;
         Ok(Self::new(BufReader::new(dec)))
     }
@@ -191,7 +191,7 @@ impl RecordStream<BufReader<ZDecoder>> {
 impl RecordStream<BufReader<Counting<ZDecoder>>> {
     /// Like `open`, but also counts decompressed bytes consumed.
     pub fn open_counting(path: &Path) -> Result<Self> {
-        let f = File::open(path)?;
+        let f = File::open(path).with_context(|| path.display().to_string())?;
         let dec: ZDecoder = zstd::Decoder::new(f)?;
         Ok(Self::new(BufReader::new(Counting::new(dec))))
     }

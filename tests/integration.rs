@@ -2921,6 +2921,44 @@ fn theme_renders_tool_call_details_not_just_count() {
 }
 
 #[test]
+fn theme_long_message_becomes_clickable_expandable() {
+    // A user message longer than the 160-char preview becomes a clickable span
+    // linked to a hidden div holding the full Markdown-rendered content, plus
+    // the modal shell that displays it.
+    let long = "x".repeat(200);
+    let nd = rec(1, &body_with_messages("SYS", &[("user", &long)]));
+    let html = themed_html(&nd, &[]);
+    assert!(
+        html.contains("class=\"cz-expand\""),
+        "long message preview should be a clickable span: {html}"
+    );
+    assert!(
+        html.contains("data-cz-idx=\"0\""),
+        "first expandable is idx 0"
+    );
+    assert!(
+        html.contains("id=\"cz-full-0\""),
+        "hidden full-content div present"
+    );
+    assert!(html.contains("id=\"cz-modal\""), "modal shell present");
+    // The full content (200 x's) must live in the hidden div, not the bubble.
+    assert!(
+        html.contains(&"x".repeat(200)),
+        "unabridged content must be embedded"
+    );
+}
+
+#[test]
+fn theme_short_message_is_not_expandable() {
+    let nd = rec(1, &body_with_messages("SYS", &[("user", "short message")]));
+    let html = themed_html(&nd, &[]);
+    assert!(
+        !html.contains("class=\"cz-expand\""),
+        "short message should not be clickable: {html}"
+    );
+}
+
+#[test]
 fn theme_loads_lowercase_dirs_and_styles_base_css() {
     // Real-world themes vary path casing: Fluffy/Taz use a lowercase
     // "incoming/" directory, Pushpin has no main.css (CSS lives in
@@ -2967,7 +3005,8 @@ fn builtin_html(ndjson: &str, extra: &[&str]) -> String {
         .unwrap()
         .arg("thread")
         .arg(&f.cbor_zstd)
-        .arg("--html")
+        .arg("--format")
+        .arg("html")
         .args(extra)
         .assert()
         .success()
@@ -3126,7 +3165,8 @@ fn thread_redact_custom_regex_scrubs_rendered_html() {
         .unwrap()
         .arg("thread")
         .arg(&f.cbor_zstd)
-        .arg("--html")
+        .arg("--format")
+        .arg("html")
         .arg("--redact")
         .arg(r"sk-[A-Za-z0-9]{20,}")
         .assert()
@@ -3159,7 +3199,8 @@ fn thread_redact_preset_all_and_custom_replacement() {
         .unwrap()
         .arg("thread")
         .arg(&f.cbor_zstd)
-        .arg("--html")
+        .arg("--format")
+        .arg("html")
         .arg("--redact-preset")
         .arg("all")
         .arg("--redact-replacement")
@@ -3194,7 +3235,8 @@ fn thread_redact_secretkey_preset_scrubs_labeled_credentials() {
         .unwrap()
         .arg("thread")
         .arg(&f.cbor_zstd)
-        .arg("--html")
+        .arg("--format")
+        .arg("html")
         .arg("--redact-preset")
         .arg("secretkey")
         .assert()

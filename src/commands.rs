@@ -993,7 +993,7 @@ pub struct GrepArgs {
     /// Print "id: <snippet>" per match (grep-like) instead of the table.
     #[arg(long)]
     pub show_matches: bool,
-    /// Print only the total match count.
+    /// Print only the count of matching records.
     #[arg(long)]
     pub count: bool,
     /// Output matching records as NDJSON.
@@ -1521,7 +1521,15 @@ pub fn cmd_split(args: &SplitArgs) -> Result<()> {
 /// Reconstructs conversation threads from request message histories.
 ///
 /// Each record's `capture.requestBody.messages` echoes its full parent path, so
-/// a trie over message-content hashes recovers the branching structure.
+/// the trie over message-content hashes recovers the branching structure.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ThreadFormat {
+    Json,
+    Html,
+    Mbox,
+    Maildir,
+}
+
 #[derive(clap::Args)]
 pub struct ThreadArgs {
     #[arg(required = true)]
@@ -1530,14 +1538,11 @@ pub struct ThreadArgs {
     #[arg(short, long)]
     pub output: Option<PathBuf>,
     /// Output format: json (default), html (built-in renderer), mbox, maildir.
-    #[arg(long, value_name = "FMT", default_value = "json")]
-    pub format: String,
+    #[arg(long, value_enum, default_value = "json")]
+    pub format: ThreadFormat,
     /// Body rendering for mbox/maildir: plain, html (multipart/alternative), html-only.
     #[arg(long, value_name = "MODE", default_value = "html")]
     pub body: String,
-    /// Emit self-contained HTML using the built-in long-form renderer.
-    #[arg(long)]
-    pub html: bool,
     /// Dark mode for the built-in HTML renderer.
     #[arg(long)]
     pub dark: bool,
@@ -1595,7 +1600,7 @@ pub fn cmd_thread(args: &ThreadArgs) -> Result<()> {
     let j = builder.to_json(total, with_messages);
 
     // Built-in long-form HTML renderer (no external theme bundle).
-    if args.html && args.theme.is_none() {
+    if args.format == ThreadFormat::Html && args.theme.is_none() {
         let html = builtin::render_html(&j, args.dark)?;
         write_output(args.output.as_ref(), html.as_bytes(), "html")?;
         eprintln!(
@@ -1620,9 +1625,9 @@ pub fn cmd_thread(args: &ThreadArgs) -> Result<()> {
 
     // MBOX / Maildir export: each trie node becomes one email, threaded by
     // Message-ID / In-Reply-To. Selected by --format mbox|maildir.
-    if args.format == "mbox" || args.format == "maildir" {
+    if args.format == ThreadFormat::Mbox || args.format == ThreadFormat::Maildir {
         let mode = mailbox::BodyMode::parse(&args.body)?;
-        if args.format == "mbox" {
+        if args.format == ThreadFormat::Mbox {
             // mbox may write to stdout (`-` or no -o) or a file.
             let n = match args.output.as_ref() {
                 Some(p) if p.as_path() != Path::new("-") => mailbox::write_mbox(&j, mode, p)?,

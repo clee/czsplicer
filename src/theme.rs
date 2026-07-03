@@ -21,6 +21,7 @@
 //! consecutive messages attach). We honor the fallback chain: NextContent ->
 //! Content; Outgoing/* -> Incoming/*; anything missing -> generic Content.
 
+use crate::markdown;
 use crate::render::{best_record_id, escape_html, model_of, sender_color};
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value as Json;
@@ -127,6 +128,7 @@ impl Theme {
 
         let mut body = String::new();
         let paths = crate::thread::all_paths(forest);
+        let mut expandables: Vec<String> = Vec::new();
         for (idx, path) in paths.iter().enumerate() {
             if paths.len() > 1 {
                 body.push_str(&format!(
@@ -137,19 +139,22 @@ impl Theme {
                 ));
             }
             body.push_str("<div id=\"Chat\">\n");
-            body.push_str(&self.render_path(path, records));
+            body.push_str(&self.render_path(path, records, &mut expandables));
             body.push_str("</div>\n");
         }
 
+        let modal = expand_modal(&expandables);
         let title = format!("{} — czsplicer", self.name);
         format!(
-            "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
-             <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n\
-             <title>{title}</title>\n<style>\n{css}{variant_css}\n</style>\n</head>\n<body>\n\
-             {body}\n</body>\n</html>\n",
+            "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\
+             <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+             <title>{title}</title>\n<style>\n{css}{variant_css}\n{modal_css}\n</style>\n</head>\n<body>\
+             {body}\n{modal}\n</body>\n</html>\n",
             css = self.main_css,
             variant_css = variant_css,
+            modal_css = MODAL_CSS,
             body = body,
+            modal = modal,
             title = title,
         )
     }
@@ -184,6 +189,7 @@ impl Theme {
         &self,
         path: &[&Json],
         records: Option<&serde_json::Map<String, Json>>,
+        expandables: &mut Vec<String>,
     ) -> String {
         let mut out = String::new();
         let mut prev_sender: Option<String> = None;
@@ -218,6 +224,20 @@ impl Theme {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            // Adium bubbles show a 160-char preview. When the full message is
+            // longer, wrap the preview in a clickable span that opens a modal
+            // with the complete message rendered as Markdown (see expand_modal).
+            let full_text = node.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let text_html = if full_text.chars().count() > crate::thread::PREVIEW_LEN {
+                let idx = expandables.len();
+                expandables.push(markdown::to_html(full_text));
+                format!(
+                    "<span class=\"cz-expand\" data-cz-idx=\"{idx}\" role=\"button\" tabindex=\"0\">{}</span>",
+                    escape_html(&message_text)
+                )
+            } else {
+                escape_html(&message_text)
+            };
             // For assistant turns, build tool-call/result HTML (from
             // tool_events) to append to the message. Adium themes have no
             // separate %tool_calls% keyword, so the HTML is concatenated onto
@@ -236,11 +256,11 @@ impl Theme {
             // Escape the text portion but keep tool HTML raw (it's already
             // escaped internally by tool_events_html).
             let message_field = if tools_html.is_empty() {
-                escape_html(&message_text)
+                text_html
             } else if message_text.is_empty() {
                 tools_html
             } else {
-                format!("{}\n\n{}", escape_html(&message_text), tools_html)
+                format!("{}\n\n{}", text_html, tools_html)
             };
             let time = node_time(meta_rec);
 
@@ -293,23 +313,71 @@ struct Subst<'a> {
 /// recognized but the payload is currently ignored — handled as their base
 /// keyword. (Spike scope.)
 fn substitute(template: &str, s: &Subst) -> String {
-    let mut out = String::with_capacity(template.len());
     let bytes = template.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(template.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
             if let Some(end) = find_keyword_end(template, i) {
                 let kw = &template[i + 1..end];
                 if let Some(repl) = resolve_keyword(kw, s) {
-                    out.push_str(repl);
+                    out.extend_from_slice(repl.as_bytes());
                     i = end + 1;
                     continue;
                 }
             }
         }
-        out.push(bytes[i] as char);
+        out.push(bytes[i]);
         i += 1;
     }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Styles for the expandable-message modal. Theme-agnostic (system colors) so
+/// it stays readable over any Adium bubble palette.
+const MODAL_CSS: &str = r#"
+.cz-expand{cursor:pointer;text-decoration:underline dotted #888}
+.cz-expand:hover{background:rgba(127,127,127,.12)}
+.cz-full{display:none}
+#cz-modal{position:fixed;inset:0;display:none;z-index:9999}
+#cz-modal.cz-open{display:block}
+#cz-modal .cz-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.5)}
+#cz-modal .cz-panel{position:relative;background:Canvas;color:CanvasText;max-width:48rem;width:calc(100% - 2rem);max-height:85vh;overflow:auto;margin:3rem auto;border-radius:8px;padding:1.5rem 2rem;box-shadow:0 8px 32px rgba(0,0,0,.3)}
+#cz-modal .cz-close{position:absolute;top:.4rem;right:.6rem;font-size:1.4rem;line-height:1;cursor:pointer;border:none;background:none;color:inherit;padding:.25rem .5rem}
+#cz-modal-body pre{background:rgba(127,127,127,.1);padding:.5rem;overflow:auto;border-radius:4px}
+#cz-modal-body code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+"#;
+
+/// Hidden full-content divs (one per expandable) plus the modal shell and the
+/// JS that wires `.cz-expand` clicks to open the matching content. The divs
+/// carry Markdown-rendered HTML produced by `markdown::to_html`.
+fn expand_modal(expandables: &[String]) -> String {
+    let mut out = String::new();
+    for (i, html) in expandables.iter().enumerate() {
+        out.push_str(&format!(
+            "<div class=\"cz-full\" id=\"cz-full-{i}\">{html}</div>\n"
+        ));
+    }
+    out.push_str(
+        r#"<div id="cz-modal"><div class="cz-backdrop"></div><div class="cz-panel"><button class="cz-close" aria-label="Close">&times;</button><div id="cz-modal-body"></div></div></div>
+<script>
+(function(){
+var m=document.getElementById('cz-modal');if(!m)return;
+var body=document.getElementById('cz-modal-body');
+function open(i){var s=document.getElementById('cz-full-'+i);if(s){body.innerHTML=s.innerHTML;m.classList.add('cz-open');}}
+function close(){m.classList.remove('cz-open');body.innerHTML='';}
+m.querySelector('.cz-backdrop').addEventListener('click',close);
+m.querySelector('.cz-close').addEventListener('click',close);
+document.addEventListener('keydown',function(e){if(e.key==='Escape')close();});
+document.querySelectorAll('.cz-expand').forEach(function(el){
+var i=el.getAttribute('data-cz-idx');
+el.addEventListener('click',function(){open(i);});
+el.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();open(i);}});
+});
+})();
+</script>
+"#,
+    );
     out
 }
 
